@@ -1,11 +1,8 @@
 name: Build CalascioNES for Android (Full Workflow)
 
 on:
-  # Gatilho para executar em cada push para o branch principal
   push:
     branches: [ "master", "main" ]
-  
-  # Gatilho que FAZ O BOTÃO APARECER. Essencial para execução manual.
   workflow_dispatch:
 
 jobs:
@@ -32,7 +29,7 @@ jobs:
       run: |
         echo "Limpando arquivos temporários de execuções anteriores, se existirem..."
         rm -f SDL2-devel-*.zip
-        rm -rf temp_structure
+        rm -rf temp_structure SDL2.zip
 
         echo "Verificando se as dependências precisam ser clonadas..."
         if [ ! -d "imgui" ]; then
@@ -44,7 +41,6 @@ jobs:
         
         if [ ! -d "SDL2" ]; then
           echo "Baixando e extraindo SDL2..."
-          # Usamos a fonte do SDL2 em vez do devel-mingw para compatibilidade com Android
           wget https://github.com/libsdl-org/SDL/archive/refs/tags/release-2.30.2.zip -O SDL2.zip
           unzip SDL2.zip
           mv SDL-release-2.30.2 SDL2
@@ -101,62 +97,9 @@ jobs:
         EOF
 
         echo "Gerando CMakeLists.txt completo..."
-        cat <<'EOF' > build_dir/app/src/main/cpp/CMakeLists.txt
-        cmake_minimum_required(VERSION 3.18)
-        project(CalascioNES C CXX)
-
-        set(SDL2_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/SDL2)
-        add_library(SDL2 STATIC
-            ${SDL2_SRC_DIR}/src/*.c
-            ${SDL2_SRC_DIR}/src/atomic/*.c
-            ${SDL2_SRC_DIR}/src/audio/*.c
-            ${SDL2_SRC_DIR}/src/core/android/*.c
-            ${SDL2_SRC_DIR}/src/cpuinfo/*.c
-            ${SDL2_SRC_DIR}/src/dynapi/*.c
-            ${SDL2_SRC_DIR}/src/events/*.c
-            ${SDL2_SRC_DIR}/src/file/*.c
-            ${SDL2_SRC_DIR}/src/haptic/*.c
-            ${SDL2_SRC_DIR}/src/joystick/*.c
-            ${SDL2_SRC_DIR}/src/power/*.c
-            ${SDL2_SRC_DIR}/src/render/*.c
-            ${SDL2_SRC_DIR}/src/render/opengl/*.c
-            ${SDL2_SRC_DIR}/src/render/opengles2/*.c
-            ${SDL2_SRC_DIR}/src/stdlib/*.c
-            ${SDL2_SRC_DIR}/src/thread/*.c
-            ${SDL2_SRC_DIR}/src/timer/*.c
-            ${SDL2_SRC_DIR}/src/video/*.c
-            ${SDL2_SRC_DIR}/src/loadso/dlopen/*.c
-            ${SDL2_SRC_DIR}/src/audio/android/*.c
-            ${SDL2_SRC_DIR}/src/joystick/android/*.c
-            ${SDL2_SRC_DIR}/src/haptic/android/*.c
-            ${SDL2_SRC_DIR}/src/power/android/*.c
-            ${SDL2_SRC_DIR}/src/filesystem/android/*.c
-            ${SDL2_SRC_DIR}/src/video/android/*.c
-        )
-        target_include_directories(SDL2 PUBLIC ${SDL2_SRC_DIR}/include)
-        target_compile_definitions(SDL2 PRIVATE -DUSING_GENERATED_CONFIG_H)
-
-        file(GLOB EMU_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/CalascioNES_src/*.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/main.cpp")
-        
-        set(IMGUI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ImGui)
-        file(GLOB IMGUI_SOURCES
-            "${IMGUI_DIR}/*.cpp"
-            "${IMGUI_DIR}/backends/imgui_impl_sdl2.cpp"
-            "${IMGUI_DIR}/backends/imgui_impl_sdlrenderer2.cpp"
-        )
-        
-        add_library(calasciones SHARED ${EMU_SOURCES} ${IMGUI_SOURCES})
-
-        target_include_directories(calasciones PUBLIC
-            ${CMAKE_CURRENT_SOURCE_DIR}/CalascioNES_include
-            ${IMGUI_DIR}
-            ${IMGUI_DIR}/backends
-        )
-        
-        target_compile_options(calasciones PRIVATE -O3 -flto -march=native -fomit-frame-pointer -funroll-loops -Wall -Wno-unused-variable -Wno-unused-parameter -Wno-narrowing)
-        
-        target_link_libraries(calasciones SDL2 android log GLESv2 OpenSLES)
-EOF
+        # O 'cat <<'EOF'' estava causando o erro de sintaxe.
+        # Vamos usar 'echo -e' para escrever o conteúdo em várias linhas, o que é mais seguro em YAML.
+        echo -e 'cmake_minimum_required(VERSION 3.18)\nproject(CalascioNES C CXX)\n\nset(SDL2_SRC_DIR \${CMAKE_CURRENT_SOURCE_DIR}/SDL2)\nadd_library(SDL2 STATIC\n    \${SDL2_SRC_DIR}/src/*.c\n    \${SDL2_SRC_DIR}/src/atomic/*.c\n    \${SDL2_SRC_DIR}/src/audio/*.c\n    \${SDL2_SRC_DIR}/src/core/android/*.c\n    \${SDL2_SRC_DIR}/src/cpuinfo/*.c\n    \${SDL2_SRC_DIR}/src/dynapi/*.c\n    \${SDL2_SRC_DIR}/src/events/*.c\n    \${SDL2_SRC_DIR}/src/file/*.c\n    \${SDL2_SRC_DIR}/src/haptic/*.c\n    \${SDL2_SRC_DIR}/src/joystick/*.c\n    \${SDL2_SRC_DIR}/src/power/*.c\n    \${SDL2_SRC_DIR}/src/render/*.c\n    \${SDL2_SRC_DIR}/src/render/opengl/*.c\n    \${SDL2_SRC_DIR}/src/render/opengles2/*.c\n    \${SDL2_SRC_DIR}/src/stdlib/*.c\n    \${SDL2_SRC_DIR}/src/thread/*.c\n    \${SDL2_SRC_DIR}/src/timer/*.c\n    \${SDL2_SRC_DIR}/src/video/*.c\n    \${SDL2_SRC_DIR}/src/loadso/dlopen/*.c\n    \${SDL2_SRC_DIR}/src/audio/android/*.c\n    \${SDL2_SRC_DIR}/src/joystick/android/*.c\n    \${SDL2_SRC_DIR}/src/haptic/android/*.c\n    \${SDL2_SRC_DIR}/src/power/android/*.c\n    \${SDL2_SRC_DIR}/src/filesystem/android/*.c\n    \${SDL2_SRC_DIR}/src/video/android/*.c\n)\ntarget_include_directories(SDL2 PUBLIC \${SDL2_SRC_DIR}/include)\ntarget_compile_definitions(SDL2 PRIVATE -DUSING_GENERATED_CONFIG_H)\n\nfile(GLOB EMU_SOURCES "\${CMAKE_CURRENT_SOURCE_DIR}/CalascioNES_src/*.cpp" "\${CMAKE_CURRENT_SOURCE_DIR}/main.cpp")\n\nset(IMGUI_DIR \${CMAKE_CURRENT_SOURCE_DIR}/ImGui)\nfile(GLOB IMGUI_SOURCES\n    "\${IMGUI_DIR}/*.cpp"\n    "\${IMGUI_DIR}/backends/imgui_impl_sdl2.cpp"\n    "\${IMGUI_DIR}/backends/imgui_impl_sdlrenderer2.cpp"\n)\n\nadd_library(calasciones SHARED \${EMU_SOURCES} \${IMGUI_SOURCES})\n\ntarget_include_directories(calasciones PUBLIC\n    \${CMAKE_CURRENT_SOURCE_DIR}/CalascioNES_include\n    \${IMGUI_DIR}\n    \${IMGUI_DIR}/backends\n)\n\ntarget_compile_options(calasciones PRIVATE -O3 -flto -march=native -fomit-frame-pointer -funroll-loops -Wall -Wno-unused-variable -Wno-unused-parameter -Wno-narrowing)\n\ntarget_link_libraries(calasciones SDL2 android log GLESv2 OpenSLES)\n' > build_dir/app/src/main/cpp/CMakeLists.txt
 
     - name: 5. Compilar o APK
       run: |
