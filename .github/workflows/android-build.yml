@@ -1,8 +1,11 @@
 name: Build CalascioNES for Android (Full Workflow)
 
 on:
+  # Gatilho para executar em cada push para o branch principal
   push:
     branches: [ "master", "main" ]
+  
+  # Gatilho que FAZ O BOTÃO APARECER. Essencial para execução manual.
   workflow_dispatch:
 
 jobs:
@@ -41,6 +44,7 @@ jobs:
         
         if [ ! -d "SDL2" ]; then
           echo "Baixando e extraindo SDL2..."
+          # Usamos a fonte do SDL2 em vez do devel-mingw para compatibilidade com Android
           wget https://github.com/libsdl-org/SDL/archive/refs/tags/release-2.30.2.zip -O SDL2.zip
           unzip SDL2.zip
           mv SDL-release-2.30.2 SDL2
@@ -101,7 +105,6 @@ jobs:
         cmake_minimum_required(VERSION 3.18)
         project(CalascioNES C CXX)
 
-        # --- Construir SDL2 a partir dos fontes ---
         set(SDL2_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/SDL2)
         add_library(SDL2 STATIC
             ${SDL2_SRC_DIR}/src/*.c
@@ -133,7 +136,6 @@ jobs:
         target_include_directories(SDL2 PUBLIC ${SDL2_SRC_DIR}/include)
         target_compile_definitions(SDL2 PRIVATE -DUSING_GENERATED_CONFIG_H)
 
-        # --- Coletar os fontes do emulador e do ImGui ---
         file(GLOB EMU_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/CalascioNES_src/*.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/main.cpp")
         
         set(IMGUI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ImGui)
@@ -143,11 +145,7 @@ jobs:
             "${IMGUI_DIR}/backends/imgui_impl_sdlrenderer2.cpp"
         )
         
-        # --- Construir a biblioteca principal do emulador ---
-        add_library(calasciones SHARED
-            ${EMU_SOURCES}
-            ${IMGUI_SOURCES}
-        )
+        add_library(calasciones SHARED ${EMU_SOURCES} ${IMGUI_SOURCES})
 
         target_include_directories(calasciones PUBLIC
             ${CMAKE_CURRENT_SOURCE_DIR}/CalascioNES_include
@@ -155,26 +153,16 @@ jobs:
             ${IMGUI_DIR}/backends
         )
         
-        # Adicionar otimizações e suprimir avisos
         target_compile_options(calasciones PRIVATE -O3 -flto -march=native -fomit-frame-pointer -funroll-loops -Wall -Wno-unused-variable -Wno-unused-parameter -Wno-narrowing)
         
-        # Linkar com SDL2 e bibliotecas do Android
-        target_link_libraries(calasciones
-            SDL2
-            android
-            log
-            GLESv2
-            OpenSLES # Para áudio
-        )
+        target_link_libraries(calasciones SDL2 android log GLESv2 OpenSLES)
 EOF
 
     - name: 5. Compilar o APK
       run: |
         cd build_dir
-        # Configurar o Gradle Wrapper dentro do diretório de build
         gradle wrapper --gradle-version 8.4
         chmod +x ./gradlew
-        # Executar a compilação
         ./gradlew :app:assembleRelease
 
     - name: 6. Publicar o APK
