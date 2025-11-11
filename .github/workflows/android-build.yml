@@ -1,13 +1,17 @@
-name: Restructure Project for Android Layout
+name: Restructure Project and Commit Changes
 
 on:
-  push:
-    branches: [ "master", "main" ]
-  workflow_dispatch: # Permite iniciar manualmente na aba "Actions" do GitHub
+  # ATENÇÃO: Acionado manualmente para evitar execuções acidentais.
+  # Vá para a aba "Actions", selecione este workflow e clique em "Run workflow".
+  workflow_dispatch:
 
 jobs:
-  restructure:
+  restructure-and-commit:
     runs-on: ubuntu-latest
+
+    # --- Permissão para a Action fazer push no repositório ---
+    permissions:
+      contents: write
 
     steps:
     - name: 1. Checkout do código fonte
@@ -22,34 +26,54 @@ jobs:
         git clone --depth 1 https://github.com/mlabbe/nativefiledialog.git
         
         echo "Baixando SDL2..."
-        # Usamos wget para baixar o zip exato que o README menciona
         wget https://github.com/libsdl-org/SDL/releases/download/release-2.30.2/SDL2-devel-2.30.2-mingw.zip
         unzip SDL2-devel-2.30.2-mingw.zip
-        # Renomeia a pasta principal para um nome simples: SDL2
         mv SDL2-2.30.2 SDL2
 
-    - name: 3. Criar a Estrutura de Pastas do Projeto
+    - name: 3. Reestruturar Arquivos
       run: |
-        echo "Criando a estrutura de pastas de destino..."
-        mkdir -p RestructuredProject/app/src/main/cpp/
-        
-    - name: 4. Mover Arquivos para a Nova Estrutura
-      run: |
-        echo "Movendo o código fonte do emulador..."
-        mv src         RestructuredProject/app/src/main/cpp/CalascioNES/
-        mv include     RestructuredProject/app/src/main/cpp/CalascioNES/
-        mv main.cpp    RestructuredProject/app/src/main/cpp/CalascioNES/
-        
-        echo "Movendo dependências..."
-        mv imgui              RestructuredProject/app/src/main/cpp/ImGui/
-        mv nativefiledialog   RestructuredProject/app/src/main/cpp/NativeFileDialog/
-        mv SDL2               RestructuredProject/app/src/main/cpp/SDL2/
-        
-        echo "Movendo arquivos de build do repositório original (Makefile, etc.)..."
-        mv makefile README.md RestructuredProject/
+        echo "Movendo arquivos para uma pasta temporária..."
+        # Cria uma pasta temporária para reorganizar tudo sem conflitos
+        mkdir temp_structure
 
-    - name: 5. Fazer Upload do Projeto Reestruturado
-      uses: actions/upload-artifact@v4
-      with:
-        name: CalascioNES-Android-Structure
-        path: RestructuredProject/
+        # Move o código do emulador para a nova estrutura
+        mkdir -p temp_structure/src/
+        mv src/* temp_structure/src/
+        rm -rf src # Remove a pasta antiga
+        
+        mkdir -p temp_structure/include/
+        mv include/* temp_structure/include/
+        rm -rf include # Remove a pasta antiga
+
+        # Move as dependências para a nova estrutura
+        mv imgui temp_structure/
+        mv nativefiledialog temp_structure/
+        mv SDL2 temp_structure/
+        
+        # Move os arquivos restantes
+        mv main.cpp makefile README.md .gitignore temp_structure/
+
+        # Agora, move tudo de volta da pasta temporária para a raiz
+        # Isso efetivamente substitui a estrutura antiga pela nova
+        mv temp_structure/* .
+
+    - name: 4. Fazer Commit e Push das Mudanças
+      run: |
+        echo "Configurando o Git..."
+        git config --global user.name "GitHub Actions Bot"
+        git config --global user.email "github-actions-bot@github.com"
+        
+        echo "Adicionando mudanças ao stage..."
+        git add .
+        
+        # Verifica se há mudanças para commitar
+        if git diff-index --quiet HEAD; then
+          echo "Nenhuma mudança para commitar. A estrutura já pode estar correta."
+        else
+          echo "Commitando as mudanças..."
+          # A mensagem de commit com [skip ci] evita que o workflow seja acionado novamente
+          git commit -m "Automated: Restructure project layout [skip ci]"
+          
+          echo "Fazendo push para o repositório..."
+          git push
+        fi
