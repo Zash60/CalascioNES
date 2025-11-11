@@ -4,6 +4,11 @@
 #include "APU.h"
 #include "PPU.h"
 
+// --- MODIFICAÇÃO PARA ANDROID ---
+// Declara que a variável `controller_state` é global e está definida em outro arquivo (main.cpp).
+// Esta variável contém o estado dos botões virtuais pressionados na tela.
+extern uint16_t controller_state;
+
 Bus::Bus(std::shared_ptr<PPU> ppu,  std::shared_ptr<Cartridge> cart, std::shared_ptr<APU> apu, std::shared_ptr<CPU> cpu)
 {
     this->cart = cart;
@@ -25,15 +30,18 @@ uint8_t Bus::cpu_reads(uint16_t address)
     {
         if (address == 0x4016)
         {
+            // A leitura quando o strobe está alto é um comportamento complexo do hardware,
+            // mas a maioria dos jogos apenas lê quando o strobe está baixo.
+            // A lógica aqui é serializar os bits do estado que foi capturado anteriormente.
             if (strobe)
-                data = controller_state & 1;
+                data = (shift_register_controller1 & 1); // Lê o estado atual do botão A
             else
             {
-                // Shift out the button states
+                // Shift out the button states bit by bit
                 data = shift_register_controller1 & 1;
                 shift_register_controller1 >>= 1;
             }
-            data |= 0x40;
+            data |= 0x40; // Emula bits abertos do barramento
         }
 
         else if (address == 0x4017)
@@ -45,7 +53,7 @@ uint8_t Bus::cpu_reads(uint16_t address)
             }
                        
             else if (strobe)
-                data = (controller_state >> 8) & 1;
+                data = (shift_register_controller2 & 1); // Lê o estado do primeiro botão do controle 2
 
             else
             {
@@ -87,67 +95,19 @@ void Bus::cpu_writes(uint16_t address, uint8_t value)
             strobe = value & 1;
             if (strobe)
             {
-
-                const uint8_t *keystate = SDL_GetKeyboardState(NULL);
-
-                uint16_t state = 0x0000;
-
-                // Button mappings for the first controller
-                if (keystate[SDL_SCANCODE_KP_8])  state |= 1 << 0;  // A button
-                if (keystate[SDL_SCANCODE_KP_7])  state |= 1 << 1;  // B button
-                if (keystate[SDL_SCANCODE_KP_4])  state |= 1 << 2;  // Select
-                if (keystate[SDL_SCANCODE_KP_5])  state |= 1 << 3;  // Start
-
-                // Up and Down
-                if (keystate[SDL_SCANCODE_W])      state |= 1 << 4;  // Up
-                if (keystate[SDL_SCANCODE_S])      state |= 1 << 5;  // Down
-
-                // Left and Right
-                if (keystate[SDL_SCANCODE_A])      state |= 1 << 6;  // Left
-                if (keystate[SDL_SCANCODE_D])      state |= 1 << 7;  // Right
-
-                // Reset state for Up and Down if both are pressed
-                if (keystate[SDL_SCANCODE_W] && keystate[SDL_SCANCODE_S]) {
-                    state &= ~(1 << 4);  // Clear Up
-                    state &= ~(1 << 5);  // Clear Down
-                }
-
-                // Reset state for Left and Right if both are pressed
-                if (keystate[SDL_SCANCODE_A] && keystate[SDL_SCANCODE_D]) {
-                    state &= ~(1 << 6);  // Clear Left
-                    state &= ~(1 << 7);  // Clear Right
-                }
-
+                // --- MODIFICAÇÃO PARA ANDROID ---
+                // A lógica original de ler o teclado foi removida.
+                // Em vez disso, capturamos o estado da variável global `controller_state`,
+                // que é atualizada pelos controles de toque em main.cpp.
+                
+                // Carrega o estado atual no registrador interno para que possa ser lido bit a bit.
+                shift_register_controller1 = controller_state & 0xFF;
+                
                 if(!zapper_connected)
                 {
-                    // Second controller's button mappings
-                    if (keystate[SDL_SCANCODE_Y])  state |= 1 << 8;  // A button
-                    if (keystate[SDL_SCANCODE_T])  state |= 1 << 9;  // B button
-                    if (keystate[SDL_SCANCODE_G])  state |= 1 << 10; // Select
-                    if (keystate[SDL_SCANCODE_H])  state |= 1 << 11; // Start
-
-                    // Up and Down for the second controller
-                    if (keystate[SDL_SCANCODE_UP])    state |= 1 << 12;  // Up
-                    if (keystate[SDL_SCANCODE_DOWN])  state |= 1 << 13;  // Down
-                    if (keystate[SDL_SCANCODE_LEFT])  state |= 1 << 14;  // Left
-                    if (keystate[SDL_SCANCODE_RIGHT]) state |= 1 << 15;  // Right
-
-                    // Reset state for Up and Down on the second controller if both are pressed
-                    if (keystate[SDL_SCANCODE_UP] && keystate[SDL_SCANCODE_DOWN]) {
-                        state &= ~(1 << 12);  // Clear Up
-                        state &= ~(1 << 13);  // Clear Down
-                    }
-
-                    // Reset state for Left and Right on the second controller if both are pressed
-                    if (keystate[SDL_SCANCODE_LEFT] && keystate[SDL_SCANCODE_RIGHT]) {
-                        state &= ~(1 << 14);  // Clear Left
-                        state &= ~(1 << 15);  // Clear Right
-                    }
-                    shift_register_controller2 = (state >> 8) & 0xFF;
+                    // Se um segundo controle fosse implementado, seu estado estaria nos 8 bits superiores.
+                    shift_register_controller2 = (controller_state >> 8) & 0xFF;
                 }
-      
-                // Update shift registers
-                shift_register_controller1 = state & 0xFF;
             }    
         }
         else
