@@ -167,7 +167,6 @@ jobs:
             OpenSLES # Para áudio
         )
 EOF
-
     - name: 5. Compilar o APK
       run: |
         cd build_dir
