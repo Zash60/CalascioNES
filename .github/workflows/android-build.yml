@@ -3,7 +3,7 @@ name: Build CalascioNES for Android
 on:
   push:
     branches: [ "master", "main" ]
-  workflow_dispatch: # Permite iniciar a build manualmente na aba "Actions" do GitHub
+  workflow_dispatch:
 
 jobs:
   build-android:
@@ -25,13 +25,15 @@ jobs:
     - name: 4. Configurar Android NDK
       uses: nttld/setup-ndk@v1
       with:
-        ndk-version: r25c # Versão estável do NDK
+        ndk-version: r25c
 
-    - name: 5. Baixar dependências (SDL2)
+    - name: 5. Baixar dependências (SDL2 e ImGui)
       run: |
         echo "Baixando SDL2..."
         git clone --depth 1 -b release-2.30.2 https://github.com/libsdl-org/SDL.git
-        # O ImGui já está no repositório, então não é necessário clonar.
+        
+        echo "Baixando ImGui..."
+        git clone --depth 1 -b docking https://github.com/ocornut/imgui.git
 
     - name: 6. Reestruturar projeto para o formato Android
       run: |
@@ -44,7 +46,7 @@ jobs:
         mv include app/src/main/cpp/CalascioNES/
         mv main.cpp app/src/main/cpp/CalascioNES/
         
-        # Mover ImGui
+        # Mover ImGui (agora ele existe)
         mv imgui app/src/main/cpp/ImGui/
 
         # Mover SDL
@@ -192,7 +194,6 @@ jobs:
 
     - name: 8. Configurar o Gradle Wrapper
       run: |
-        # Usar uma versão estável do Gradle
         gradle wrapper --gradle-version 8.4
         chmod +x ./gradlew
 
