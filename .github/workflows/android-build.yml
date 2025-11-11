@@ -92,7 +92,6 @@ jobs:
 
         echo "Gerando build.gradle (nível do projeto)..."
         cat <<EOF > build_dir/build.gradle
-        // Este arquivo está intencionalmente quase vazio para usar a configuração moderna do Gradle.
         plugins {
             id 'com.android.application' version '8.2.0' apply false
         }
@@ -103,11 +102,9 @@ jobs:
         plugins {
             id 'com.android.application'
         }
-
         android {
             namespace "com.franco1262.calasciones"
             compileSdk 34
-
             defaultConfig {
                 applicationId "com.franco1262.calasciones"
                 minSdk 21
@@ -115,7 +112,6 @@ jobs:
                 versionCode 1
                 versionName "1.0"
             }
-
             externalNativeBuild {
                 cmake {
                     path "src/main/cpp/CMakeLists.txt"
@@ -125,17 +121,69 @@ jobs:
         }
         EOF
 
-        echo "Gerando CMakeLists.txt completo..."
-        echo -e 'cmake_minimum_required(VERSION 3.18)\nproject(CalascioNES C CXX)\n\nset(SDL2_SRC_DIR \${CMAKE_CURRENT_SOURCE_DIR}/SDL2)\nadd_library(SDL2 STATIC\n    \${SDL2_SRC_DIR}/src/*.c\n    \${SDL2_SRC_DIR}/src/atomic/*.c\n    \${SDL2_SRC_DIR}/src/audio/*.c\n    \${SDL2_SRC_DIR}/src/core/android/*.c\n    \${SDL2_SRC_DIR}/src/cpuinfo/*.c\n    \${SDL2_SRC_DIR}/src/dynapi/*.c\n    \${SDL2_SRC_DIR}/src/events/*.c\n    \${SDL2_SRC_DIR}/src/file/*.c\n    \${SDL2_SRC_DIR}/src/haptic/*.c\n    \${SDL2_SRC_DIR}/src/joystick/*.c\n    \${SDL2_SRC_DIR}/src/power/*.c\n    \${SDL2_SRC_DIR}/src/render/*.c\n    \${SDL2_SRC_DIR}/src/render/opengl/*.c\n    \${SDL2_SRC_DIR}/src/render/opengles2/*.c\n    \${SDL2_SRC_DIR}/src/stdlib/*.c\n    \${SDL2_SRC_DIR}/src/thread/*.c\n    \${SDL2_SRC_DIR}/src/timer/*.c\n    \${SDL2_SRC_DIR}/src/video/*.c\n    \${SDL2_SRC_DIR}/src/loadso/dlopen/*.c\n    \${SDL2_SRC_DIR}/src/audio/android/*.c\n    \${SDL2_SRC_DIR}/src/joystick/android/*.c\n    \${SDL2_SRC_DIR}/src/haptic/android/*.c\n    \${SDL2_SRC_DIR}/src/power/android/*.c\n    \${SDL2_SRC_DIR}/src/filesystem/android/*.c\n    \${SDL2_SRC_DIR}/src/video/android/*.c\n)\ntarget_include_directories(SDL2 PUBLIC \${SDL2_SRC_DIR}/include)\ntarget_compile_definitions(SDL2 PRIVATE -DUSING_GENERATED_CONFIG_H)\n\nfile(GLOB EMU_SOURCES "\${CMAKE_CURRENT_SOURCE_DIR}/CalascioNES_src/*.cpp" "\${CMAKE_CURRENT_SOURCE_DIR}/main.cpp")\n\nset(IMGUI_DIR \${CMAKE_CURRENT_SOURCE_DIR}/ImGui)\nfile(GLOB IMGUI_SOURCES\n    "\${IMGUI_DIR}/*.cpp"\n    "\${IMGUI_DIR}/backends/imgui_impl_sdl2.cpp"\n    "\${IMGUI_DIR}/backends/imgui_impl_sdlrenderer2.cpp"\n)\n\nadd_library(calasciones SHARED \${EMU_SOURCES} \${IMGUI_SOURCES})\n\ntarget_include_directories(calasciones PUBLIC\n    \${CMAKE_CURRENT_SOURCE_DIR}/CalascioNES_include\n    \${IMGUI_DIR}\n    \${IMGUI_DIR}/backends\n)\n\ntarget_compile_options(calasciones PRIVATE -O3 -flto -march=native -fomit-frame-pointer -funroll-loops -Wall -Wno-unused-variable -Wno-unused-parameter -Wno-narrowing)\n\ntarget_link_libraries(calasciones SDL2 android log GLESv2 OpenSLES)\n' > build_dir/app/src/main/cpp/CMakeLists.txt
+        echo "Gerando CMakeLists.txt completo e corrigido..."
+        cat <<'EOF' > build_dir/app/src/main/cpp/CMakeLists.txt
+        cmake_minimum_required(VERSION 3.18)
+        project(CalascioNES C CXX)
+
+        # --- Construir SDL2 a partir dos fontes ---
+        set(SDL2_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/SDL2)
+        file(GLOB_RECURSE SDL2_SOURCES
+            "${SDL2_SRC_DIR}/src/atomic/*.c"
+            "${SDL2_SRC_DIR}/src/audio/*.c"
+            "${SDL2_SRC_DIR}/src/core/android/*.c"
+            "${SDL2_SRC_DIR}/src/cpuinfo/*.c"
+            "${SDL2_SRC_DIR}/src/dynapi/*.c"
+            "${SDL2_SRC_DIR}/src/events/*.c"
+            "${SDL2_SRC_DIR}/src/file/*.c"
+            "${SDL2_SRC_DIR}/src/haptic/android/*.c"
+            "${SDL2_SRC_DIR}/src/joystick/android/*.c"
+            "${SDL2_SRC_DIR}/src/power/android/*.c"
+            "${SDL2_SRC_DIR}/src/render/opengles2/*.c"
+            "${SDL2_SRC_DIR}/src/stdlib/*.c"
+            "${SDL2_SRC_DIR}/src/thread/*.c"
+            "${SDL2_SRC_DIR}/src/timer/*.c"
+            "${SDL2_SRC_DIR}/src/video/android/*.c"
+            "${SDL2_SRC_DIR}/src/filesystem/android/*.c"
+        )
+        add_library(SDL2 STATIC ${SDL2_SOURCES})
+        target_include_directories(SDL2 PUBLIC ${SDL2_SRC_DIR}/include)
+        target_compile_definitions(SDL2 PRIVATE -DUSING_GENERATED_CONFIG_H)
+
+        # --- Coletar os fontes do emulador e do ImGui ---
+        file(GLOB EMU_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/CalascioNES_src/*.cpp")
+        
+        set(IMGUI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ImGui)
+        file(GLOB IMGUI_SOURCES
+            "${IMGUI_DIR}/*.cpp"
+            "${IMGUI_DIR}/backends/imgui_impl_sdl2.cpp"
+            "${IMGUI_DIR}/backends/imgui_impl_sdlrenderer2.cpp"
+        )
+        
+        # --- Construir a biblioteca principal do emulador ---
+        add_library(calasciones SHARED
+            ${EMU_SOURCES}
+            ${IMGUI_SOURCES}
+            "${CMAKE_CURRENT_SOURCE_DIR}/main.cpp"
+        )
+
+        target_include_directories(calasciones PUBLIC
+            ${CMAKE_CURRENT_SOURCE_DIR}/CalascioNES_include
+            ${IMGUI_DIR}
+            ${IMGUI_DIR}/backends
+        )
+        
+        target_compile_options(calasciones PRIVATE -O3 -flto -march=native -fomit-frame-pointer -funroll-loops -Wall -Wno-unused-variable -Wno-unused-parameter -Wno-narrowing)
+        
+        target_link_libraries(calasciones SDL2 android log GLESv2 OpenSLES)
+EOF
 
     - name: 5. Compilar o APK
       run: |
         cd build_dir
-        # Configurar o Gradle Wrapper dentro do diretório de build
         gradle wrapper --gradle-version 8.4
         chmod +x ./gradlew
-        # Executar a compilação
-        ./gradlew :app:assembleRelease
+        ./gradlew :app:assembleRelease --stacktrace
 
     - name: 6. Publicar o APK
       uses: actions/upload-artifact@v4
