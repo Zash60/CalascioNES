@@ -1,207 +1,55 @@
-name: Build CalascioNES for Android
+name: Restructure Project for Android Layout
 
 on:
   push:
     branches: [ "master", "main" ]
-  workflow_dispatch:
+  workflow_dispatch: # Permite iniciar manualmente na aba "Actions" do GitHub
 
 jobs:
-  build-android:
+  restructure:
     runs-on: ubuntu-latest
 
     steps:
     - name: 1. Checkout do código fonte
       uses: actions/checkout@v4
 
-    - name: 2. Configurar JDK (Java Development Kit)
-      uses: actions/setup-java@v4
-      with:
-        distribution: 'zulu'
-        java-version: '17'
-        
-    - name: 3. Configurar Android SDK
-      uses: android-actions/setup-android@v3
-
-    - name: 4. Configurar Android NDK
-      uses: nttld/setup-ndk@v1
-      with:
-        ndk-version: r25c
-
-    - name: 5. Baixar dependências (SDL2 e ImGui)
+    - name: 2. Baixar Dependências
       run: |
+        echo "Clonando ImGui..."
+        git clone --depth 1 https://github.com/ocornut/imgui.git
+
+        echo "Clonando NativeFileDialog..."
+        git clone --depth 1 https://github.com/mlabbe/nativefiledialog.git
+        
         echo "Baixando SDL2..."
-        git clone --depth 1 -b release-2.30.2 https://github.com/libsdl-org/SDL.git
-        
-        echo "Baixando ImGui..."
-        git clone --depth 1 -b docking https://github.com/ocornut/imgui.git
+        # Usamos wget para baixar o zip exato que o README menciona
+        wget https://github.com/libsdl-org/SDL/releases/download/release-2.30.2/SDL2-devel-2.30.2-mingw.zip
+        unzip SDL2-devel-2.30.2-mingw.zip
+        # Renomeia a pasta principal para um nome simples: SDL2
+        mv SDL2-2.30.2 SDL2
 
-    - name: 6. Reestruturar projeto para o formato Android
+    - name: 3. Criar a Estrutura de Pastas do Projeto
       run: |
-        echo "Criando estrutura de pastas do projeto Android..."
-        mkdir -p app/src/main/cpp/ app/src/main/java/
-
-        echo "Movendo código fonte do emulador..."
-        # Mover arquivos e pastas principais
-        mv src app/src/main/cpp/CalascioNES/
-        mv include app/src/main/cpp/CalascioNES/
-        mv main.cpp app/src/main/cpp/CalascioNES/
+        echo "Criando a estrutura de pastas de destino..."
+        mkdir -p RestructuredProject/app/src/main/cpp/
         
-        # Mover ImGui (agora ele existe)
-        mv imgui app/src/main/cpp/ImGui/
-
-        # Mover SDL
-        mv SDL app/src/main/cpp/SDL2/
-
-    - name: 7. Gerar arquivos de configuração e build
+    - name: 4. Mover Arquivos para a Nova Estrutura
       run: |
-        echo "Gerando AndroidManifest.xml..."
-        cat <<EOF > app/src/main/AndroidManifest.xml
-        <?xml version="1.0" encoding="utf-8"?>
-        <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-            <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
-            <application
-                android:allowBackup="true"
-                android:label="CalascioNES"
-                android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
-                <activity android:name="org.libsdl.app.SDLActivity"
-                          android:exported="true"
-                          android:screenOrientation="landscape">
-                    <intent-filter>
-                        <action android:name="android.intent.action.MAIN" />
-                        <category android:name="android.intent.category.LAUNCHER" />
-                    </intent-filter>
-                </activity>
-            </application>
-        </manifest>
-        EOF
-
-        echo "Gerando settings.gradle..."
-        echo "include ':app'" > settings.gradle
-
-        echo "Gerando build.gradle (nível do projeto)..."
-        cat <<EOF > build.gradle
-        buildscript {
-            repositories { google(); mavenCentral(); }
-            dependencies { classpath 'com.android.tools.build:gradle:8.2.0'; }
-        }
-        allprojects {
-            repositories { google(); mavenCentral(); }
-        }
-        task clean(type: Delete) { delete rootProject.buildDir; }
-        EOF
-
-        echo "Gerando build.gradle (nível do app)..."
-        cat <<EOF > app/build.gradle
-        plugins { id 'com.android.application' }
-
-        android {
-            namespace "com.franco1262.calasciones"
-            compileSdk 34
-            defaultConfig {
-                applicationId "com.franco1262.calasciones"
-                minSdk 21
-                targetSdk 34
-                versionCode 1
-                versionName "1.0"
-            }
-            externalNativeBuild {
-                cmake {
-                    path "src/main/cpp/CMakeLists.txt"
-                    version "3.22.1"
-                }
-            }
-            buildTypes {
-                release {
-                    minifyEnabled false
-                    proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
-                }
-            }
-        }
-        EOF
-
-        echo "Gerando CMakeLists.txt..."
-        cat <<EOF > app/src/main/cpp/CMakeLists.txt
-        cmake_minimum_required(VERSION 3.18)
-        project(CalascioNES C CXX)
-
-        # --- Construir SDL2 a partir dos fontes ---
-        set(SDL2_SRC_DIR \${CMAKE_CURRENT_SOURCE_DIR}/SDL2)
-        add_library(SDL2 STATIC
-            \${SDL2_SRC_DIR}/src/*.c
-            \${SDL2_SRC_DIR}/src/atomic/*.c
-            \${SDL2_SRC_DIR}/src/audio/*.c
-            \${SDL2_SRC_DIR}/src/core/android/*.c
-            \${SDL2_SRC_DIR}/src/cpuinfo/*.c
-            \${SDL2_SRC_DIR}/src/dynapi/*.c
-            \${SDL2_SRC_DIR}/src/events/*.c
-            \${SDL2_SRC_DIR}/src/file/*.c
-            \${SDL2_SRC_DIR}/src/haptic/*.c
-            \${SDL2_SRC_DIR}/src/joystick/*.c
-            \${SDL2_SRC_DIR}/src/power/*.c
-            \${SDL2_SRC_DIR}/src/render/*.c
-            \${SDL2_SRC_DIR}/src/render/opengl/*.c
-            \${SDL2_SRC_DIR}/src/render/opengles2/*.c
-            \${SDL2_SRC_DIR}/src/stdlib/*.c
-            \${SDL2_SRC_DIR}/src/thread/*.c
-            \${SDL2_SRC_DIR}/src/timer/*.c
-            \${SDL2_SRC_DIR}/src/video/*.c
-            \${SDL2_SRC_DIR}/src/loadso/dlopen/*.c
-            \${SDL2_SRC_DIR}/src/audio/android/*.c
-            \${SDL2_SRC_DIR}/src/joystick/android/*.c
-            \${SDL2_SRC_DIR}/src/haptic/android/*.c
-            \${SDL2_SRC_DIR}/src/power/android/*.c
-            \${SDL2_SRC_DIR}/src/filesystem/android/*.c
-            \${SDL2_SRC_DIR}/src/video/android/*.c
-        )
-        target_include_directories(SDL2 PUBLIC \${SDL2_SRC_DIR}/include)
-        target_compile_definitions(SDL2 PRIVATE -DUSING_GENERATED_CONFIG_H)
-
-        # --- Coletar os fontes do emulador e do ImGui ---
-        set(EMU_SRC_DIR \${CMAKE_CURRENT_SOURCE_DIR}/CalascioNES)
-        file(GLOB EMU_SOURCES "\${EMU_SRC_DIR}/src/*.cpp" "\${EMU_SRC_DIR}/main.cpp")
+        echo "Movendo o código fonte do emulador..."
+        mv src         RestructuredProject/app/src/main/cpp/CalascioNES/
+        mv include     RestructuredProject/app/src/main/cpp/CalascioNES/
+        mv main.cpp    RestructuredProject/app/src/main/cpp/CalascioNES/
         
-        set(IMGUI_DIR \${CMAKE_CURRENT_SOURCE_DIR}/ImGui)
-        file(GLOB IMGUI_SOURCES
-            "\${IMGUI_DIR}/*.cpp"
-            "\${IMGUI_DIR}/backends/imgui_impl_sdl2.cpp"
-            "\${IMGUI_DIR}/backends/imgui_impl_sdlrenderer2.cpp"
-        )
+        echo "Movendo dependências..."
+        mv imgui              RestructuredProject/app/src/main/cpp/ImGui/
+        mv nativefiledialog   RestructuredProject/app/src/main/cpp/NativeFileDialog/
+        mv SDL2               RestructuredProject/app/src/main/cpp/SDL2/
         
-        # --- Construir a biblioteca principal do emulador ---
-        add_library(calasciones SHARED
-            \${EMU_SOURCES}
-            \${IMGUI_SOURCES}
-        )
+        echo "Movendo arquivos de build do repositório original (Makefile, etc.)..."
+        mv makefile README.md RestructuredProject/
 
-        target_include_directories(calasciones PUBLIC
-            \${EMU_SRC_DIR}/include
-            \${IMGUI_DIR}
-            \${IMGUI_DIR}/backends
-        )
-        
-        # Adicionar otimizações
-        target_compile_options(calasciones PRIVATE -O3 -flto -march=native -fomit-frame-pointer -funroll-loops -Wall -Wno-unused-variable -Wno-unused-parameter)
-        
-        # Linkar com SDL2 e bibliotecas do Android
-        target_link_libraries(calasciones
-            SDL2
-            android
-            log
-            GLESv2
-            OpenSLES # Para áudio
-        )
-        EOF
-
-    - name: 8. Configurar o Gradle Wrapper
-      run: |
-        gradle wrapper --gradle-version 8.4
-        chmod +x ./gradlew
-
-    - name: 9. Compilar o APK com Gradle
-      run: ./gradlew :app:assembleRelease
-
-    - name: 10. Publicar o APK como artefato
+    - name: 5. Fazer Upload do Projeto Reestruturado
       uses: actions/upload-artifact@v4
       with:
-        name: CalascioNES-Android-APK
-        path: app/build/outputs/apk/release/app-release-unsigned.apk
+        name: CalascioNES-Android-Structure
+        path: RestructuredProject/
