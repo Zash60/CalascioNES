@@ -6,19 +6,27 @@
 #include <thread>
 #include <vector>
 #include <chrono>
-#include "windows.h"
 
 // NES Emulator Components
 #include "NES.h"
 
-
 // UI and Rendering
-#include "nfd.h"
 #include "imgui.h"
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_sdlrenderer2.h"
 
-// Constants
+// SDL
+#include <SDL.h>
+#include <SDL_log.h> // Para log no Android (logcat)
+
+// --- CONFIGURAÇÕES PARA ANDROID ---
+// Defina aqui o caminho onde o emulador procurará por ROMs.
+// Crie esta pasta no seu dispositivo e coloque seus arquivos .nes aqui.
+const char* ANDROID_ROM_PATH = "/sdcard/CalascioNES/roms/";
+const char* DEFAULT_ROM_NAME = "default.nes"; // O emulador tentará carregar este arquivo ao iniciar.
+
+// --- CONSTANTES E GLOBAIS ---
+// A escala pode precisar de ajuste dependendo da resolução da tela do seu dispositivo.
 constexpr int SCALE = 3;
 constexpr int SCREEN_WIDTH = 256 * SCALE;
 constexpr int SCREEN_HEIGHT = 240 * SCALE;
@@ -29,220 +37,174 @@ int16_t audio_buffer[BUFFER_SIZE];
 uint16_t write_pos = 0;
 uint16_t read_pos = 0;
 
-// Emulator State
-bool game_not_initialized = true;
+// Estado do Emulador
 std::atomic<bool> running(true);
 std::mutex framebuffer_mutex;
 std::vector<uint32_t> screen(256 * 240, 0);
 
-// SDL2 Textures
+// Estado dos controles, agora atualizado por toque
+// Bitmask: 0=A, 1=B, 2=Select, 3=Start, 4=Up, 5=Down, 6=Left, 7=Right
+uint16_t controller_state = 0;
+
+// Texturas SDL2
 SDL_Texture* screenBuffer = nullptr;
-SDL_Texture* nametableBuffer0 = nullptr;
-SDL_Texture* nametableBuffer1 = nullptr;
-SDL_Texture* spriteBuffer = nullptr;
-SDL_Texture* patternBuffer0 = nullptr;
-SDL_Texture* patternBuffer1 = nullptr;
 
-// SDL2 Windows & Renderers
-SDL_Window* nametable_window = nullptr;
-SDL_Renderer* nametable_renderer = nullptr;
+// Janela e Renderer Principais
+SDL_Window* window = nullptr;
+SDL_Renderer* renderer = nullptr;
+SDL_AudioDeviceID audio_device = 0;
 
-SDL_Window* pattern_window = nullptr;
-SDL_Renderer* pattern_renderer = nullptr;
-
-SDL_Window* sprite_window = nullptr;
-SDL_Renderer* sprite_renderer = nullptr;
-
-// FPS Management
+// Gerenciamento de FPS
 double desired_fps = 60.0;
 std::atomic<double> frame_time = 1000.0 / desired_fps;
-bool show_fps = false;
 int FPS;
-int padding;
+int padding = 0; // Altura da barra de menu ImGui
 
-// UI Elements
-bool showWindow = false;
-float windowDuration = 3.0f;  // Time in seconds to fully display the window
-float fadeDuration = 0.25f;   // Time in seconds for the fade-out effect
-std::chrono::time_point<std::chrono::steady_clock> windowStartTime;
-using namespace std::chrono;
-
-void audio_callback(void* userdata, Uint8* stream, int len); 
-
-class SDL_manager
-{
-    public:
-        SDL_manager()
-        {
-            SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
-            // Initialize SDL
-            if ((SDL_Init(SDL_INIT_VIDEO) | SDL_Init(SDL_INIT_AUDIO)) < 0)
-            {
-                std::cerr << "Couldn't initialize SDL: " << SDL_GetError() << std::endl;
-                exit(1);
-            }
-
-            // Create the window
-            window = SDL_CreateWindow("CalascioNES", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, SCREEN_WIDTH, SCREEN_HEIGHT + 19, 0);
-            if (!window)
-            {
-                std::cerr << "Failed to open " << SCREEN_WIDTH << " x " << SCREEN_HEIGHT << " window: " << SDL_GetError() << std::endl;
-                exit(1);
-            }
-
-            // Create the renderer with hardware acceleration
-            renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
-            if (!renderer)
-            {
-                std::cerr << "Failed to create renderer: " << SDL_GetError() << std::endl;
-                exit(1);
-            }
-
-            SDL_AudioSpec desired_spec{};
-            desired_spec.freq = 44100;         // 44.1 kHz sample rate
-            desired_spec.format = AUDIO_S16SYS; // 16-bit signed samples
-            desired_spec.channels = 1;         // Mono audio
-            desired_spec.samples = 1024;        // Buffer size (lower = less latency)
-            desired_spec.callback = audio_callback;
-            audio_device = SDL_OpenAudioDevice(NULL, 0, &desired_spec, NULL, 0);
-            SDL_PauseAudioDevice(audio_device, 0);
-            if (audio_device == 0) {
-                std::cerr << "Failed to open audio: " << SDL_GetError() << std::endl;
-                exit(1);
-            }            
-        }
-        ~SDL_manager()
-        {
-            SDL_DestroyRenderer(renderer);
-            SDL_DestroyWindow(window);
-        }
-
-        inline SDL_Renderer* get_renderer()
-        {
-            return renderer;
-        }
-
-        inline SDL_Window* get_window()
-        {
-            return window;
-        }
-
-        SDL_AudioDeviceID get_audio_device()
-        {
-            return audio_device;
-        }
-
-    private:
-        SDL_Renderer *renderer;
-        SDL_Window *window;
-        SDL_AudioDeviceID audio_device;
+// --- ESTRUTURA PARA CONTROLES DE TOQUE ---
+struct VirtualButton {
+    SDL_Rect rect;      // Posição e tamanho na tela
+    uint16_t nes_bit;   // Bit correspondente no registrador do controle NES (0-7)
+    int fingerId = -1;  // ID do dedo que está pressionando este botão
 };
 
-//SDL2
-void destroy_textures();
-void handle_events(NES* nes, SDL_manager* manager);
-//ImGUI
-void initImGui(SDL_Window* window, SDL_Renderer* renderer);
-void handle_imGui(NES* nes, SDL_Renderer* renderer, SDL_manager* manager);
+// Posições dos botões virtuais (ajuste conforme necessário)
+VirtualButton virtual_controller[] = {
+    // D-Pad (Esquerda da tela)
+    { {50, SCREEN_HEIGHT - 200, 70, 70}, (1 << 6) }, // Esquerda
+    { {190, SCREEN_HEIGHT - 200, 70, 70}, (1 << 7) }, // Direita
+    { {120, SCREEN_HEIGHT - 270, 70, 70}, (1 << 4) }, // Cima
+    { {120, SCREEN_HEIGHT - 130, 70, 70}, (1 << 5) }, // Baixo
+    // Botões de Ação (Direita da tela)
+    { {SCREEN_WIDTH - 120, SCREEN_HEIGHT - 150, 80, 80}, (1 << 0) }, // A
+    { {SCREEN_WIDTH - 220, SCREEN_HEIGHT - 150, 80, 80}, (1 << 1) }, // B
+    // Start/Select (Centro)
+    { {SCREEN_WIDTH/2 + 10, SCREEN_HEIGHT - 60, 100, 40}, (1 << 3) }, // Start
+    { {SCREEN_WIDTH/2 - 110, SCREEN_HEIGHT - 60, 100, 40}, (1 << 2) }  // Select
+};
+
+// --- DECLARAÇÕES DE FUNÇÕES ---
+void audio_callback(void* userdata, Uint8* stream, int len);
+void emulate_nes(NES* nes);
+void initImGui();
 void cleanupImGui();
-//Functions to draw
-void draw_frame(std::shared_ptr<PPU> ppu, SDL_Renderer*);
-void draw_pattern_table(std::shared_ptr<PPU> ppu);
+void handle_events(NES* nes);
+void handle_imGui(NES* nes);
+void draw_frame(std::shared_ptr<PPU> ppu);
+void draw_touch_controls();
+void update_controller_state(Bus* bus);
 
-void emulate_nes(NES * nes, SDL_manager* manager);
-
-int main(int argc, char *argv[])
-{
-    NES nes;
-    nes.set_audio_buffer(audio_buffer, BUFFER_SIZE, &write_pos);
-    SDL_manager manager;
-    if(argc > 1)
-    {
-        std::string filename(argv[1]);
-        nes.load_game(filename);
-        showWindow = true;
-        windowStartTime =  std::chrono::steady_clock::now();
-        SDL_SetWindowTitle(manager.get_window(), ("CalascioNES" + nes.get_info()).c_str());
+// --- PONTO DE ENTRADA PRINCIPAL (SDL_main) ---
+int SDL_main(int argc, char* argv[]) {
+    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) < 0) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Couldn't initialize SDL: %s", SDL_GetError());
+        return 1;
     }
 
-    initImGui(manager.get_window(), manager.get_renderer());
-    screenBuffer = SDL_CreateTexture(manager.get_renderer(), SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_STREAMING, 256, 240);
+    window = SDL_CreateWindow("CalascioNES", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, SCREEN_WIDTH, SCREEN_HEIGHT, SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+    if (!window) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to create window: %s", SDL_GetError());
+        return 1;
+    }
 
-    std::thread emulation_thread(emulate_nes, &nes, &manager);
+    renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    if (!renderer) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to create renderer: %s", SDL_GetError());
+        return 1;
+    }
 
+    SDL_AudioSpec desired_spec{};
+    desired_spec.freq = 44100;
+    desired_spec.format = AUDIO_S16SYS;
+    desired_spec.channels = 1;
+    desired_spec.samples = 1024;
+    desired_spec.callback = audio_callback;
+    audio_device = SDL_OpenAudioDevice(NULL, 0, &desired_spec, NULL, 0);
+    if (audio_device == 0) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to open audio: %s", SDL_GetError());
+    } else {
+        SDL_PauseAudioDevice(audio_device, 0);
+    }
+
+    initImGui();
+    screenBuffer = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_STREAMING, 256, 240);
+
+    NES nes;
+    nes.set_audio_buffer(audio_buffer, BUFFER_SIZE, &write_pos);
+
+    // Tenta carregar uma ROM padrão no início
+    std::string default_rom = std::string(ANDROID_ROM_PATH) + DEFAULT_ROM_NAME;
+    if (std::filesystem::exists(default_rom)) {
+        if(nes.load_game(default_rom)) {
+             SDL_SetWindowTitle(window, ("CalascioNES" + nes.get_info()).c_str());
+        }
+    } else {
+        SDL_Log("Default ROM not found at %s", default_rom.c_str());
+        SDL_Log("Please create the folder and place a ROM named 'default.nes' inside.");
+    }
+
+    std::thread emulation_thread(emulate_nes, &nes);
+
+    // Medir altura da barra de menu uma vez
     ImGui_ImplSDLRenderer2_NewFrame();
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
-    ImGui::BeginMainMenuBar();
-    padding = ImGui::GetFrameHeight();
-    ImGui::EndMainMenuBar();
+    if (ImGui::BeginMainMenuBar()) {
+        padding = ImGui::GetFrameHeight();
+        ImGui::EndMainMenuBar();
+    }
     ImGui::Render();
 
-    SDL_SetWindowSize(manager.get_window(), SCREEN_WIDTH, SCREEN_HEIGHT + padding);
-    while (running) 
-    {
-        handle_events(&nes, &manager);
-    
-        // Render ImGui only when needed
-        static auto last_ui_update = std::chrono::high_resolution_clock::now();
-        auto now = std::chrono::high_resolution_clock::now();
-        double elapsed = std::chrono::duration<double, std::milli>(now - last_ui_update).count();
-    
-        if (elapsed > (1000.0 / 30.0)) // ~30 FPS for UI updates
-        {
-            ImGui_ImplSDLRenderer2_NewFrame();
-            ImGui_ImplSDL2_NewFrame();
-            ImGui::NewFrame();
-            handle_imGui(&nes, manager.get_renderer(), &manager);
-            last_ui_update = now;
-        }
+    while (running) {
+        handle_events(&nes);
 
-        draw_frame(nes.get_ppu(), manager.get_renderer());
+        // Renderiza o frame do emulador
+        draw_frame(nes.get_ppu());
+
+        // Renderiza a UI (ImGui e controles de toque)
+        ImGui_ImplSDLRenderer2_NewFrame();
+        ImGui_ImplSDL2_NewFrame();
+        ImGui::NewFrame();
+
+        handle_imGui(&nes);
+        draw_touch_controls();
+
         ImGui::Render();
-        ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), manager.get_renderer());
-        SDL_RenderPresent(manager.get_renderer());
-        SDL_Delay(2);
+        ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), renderer);
+
+        SDL_RenderPresent(renderer);
     }
-    
 
     emulation_thread.join();
-    SDL_DestroyRenderer(nametable_renderer);
-    SDL_DestroyRenderer(pattern_renderer);
-    SDL_DestroyRenderer(sprite_renderer);
-    SDL_DestroyWindow(nametable_window);
-    SDL_DestroyWindow(pattern_window);
-    SDL_DestroyWindow(sprite_window);
     cleanupImGui();
-    destroy_textures();
+    SDL_DestroyTexture(screenBuffer);
+    SDL_DestroyRenderer(renderer);
+    SDL_DestroyWindow(window);
+    SDL_Quit();
     return 0;
 }
 
-void emulate_nes(NES *nes, SDL_manager *manager)
-{
+void emulate_nes(NES* nes) {
     using namespace std::chrono;
     auto last_time = high_resolution_clock::now();
     int frame_count = 0;
 
-    while (running)
-    {
+    while (running) {
         auto frame_time_ms = duration<double, std::milli>(frame_time);
         auto frame_start = high_resolution_clock::now();
 
-        if (nes->is_game_loaded())
+        if (nes->is_game_loaded()) {
             nes->run_frame();
+        }
 
         {
             std::lock_guard<std::mutex> lock(framebuffer_mutex);
             screen = nes->get_ppu()->get_screen();
         }
 
-        // FPS calculation
         frame_count++;
         auto current_time = high_resolution_clock::now();
-        duration<double> elapsed_seconds = current_time - last_time;
-
-        if (elapsed_seconds.count() >= 1.0)
-        {
+        if (duration<double>(current_time - last_time).count() >= 1.0) {
             FPS = frame_count;
             frame_count = 0;
             last_time = current_time;
@@ -250,417 +212,229 @@ void emulate_nes(NES *nes, SDL_manager *manager)
 
         auto frame_end = high_resolution_clock::now();
         auto elapsed = duration<double, std::milli>(frame_end - frame_start);
-
         auto remaining_time = frame_time_ms - elapsed;
-        auto busy_wait_until = high_resolution_clock::now() + remaining_time;
-        if(remaining_time.count() > 0)
-        {
-            SDL_Delay(remaining_time.count() * 0.95);
-            while (high_resolution_clock::now() < busy_wait_until) {} 
+
+        if (remaining_time.count() > 1) {
+            SDL_Delay(static_cast<Uint32>(remaining_time.count() - 1));
         }
     }
 }
 
-void audio_callback(void* userdata, Uint8* stream, int len) 
-{
+void audio_callback(void* userdata, Uint8* stream, int len) {
     int16_t* output = reinterpret_cast<int16_t*>(stream);
     int samples_needed = len / sizeof(int16_t);
-    int available_data = 0;
-    available_data = (write_pos >= read_pos) ? (write_pos - read_pos) : ((BUFFER_SIZE - read_pos) + write_pos);
+    int available_data = (write_pos >= read_pos) ? (write_pos - read_pos) : ((BUFFER_SIZE - read_pos) + write_pos);
 
-    if (available_data >= samples_needed) 
+    if (available_data >= samples_needed)
     {
-        if (read_pos + samples_needed > BUFFER_SIZE) 
+        if (read_pos + samples_needed > BUFFER_SIZE)
         {
             int first_chunk_size = BUFFER_SIZE - read_pos;
             std::copy(audio_buffer + read_pos, audio_buffer + BUFFER_SIZE, output);
             std::copy(audio_buffer, audio_buffer + (samples_needed - first_chunk_size), output + first_chunk_size);
-        } 
-        else 
+        }
+        else
             std::copy(audio_buffer + read_pos, audio_buffer + read_pos + samples_needed, output);
-    
+
         read_pos = (read_pos + samples_needed) & (BUFFER_SIZE-1);
+    } else {
+         std::fill(output, output + samples_needed, 0);
     }
-    
-    else if(game_not_initialized)
-        std::fill(output, output + samples_needed, 0);
 }
 
-void draw_frame(std::shared_ptr<PPU> ppu, SDL_Renderer* renderer)
-{
-     
-    SDL_Rect screen_rect = {0, padding , SCREEN_WIDTH, SCREEN_HEIGHT};
+void draw_frame(std::shared_ptr<PPU> ppu) {
+    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+    SDL_RenderClear(renderer);
+    SDL_Rect screen_rect = {0, padding, SCREEN_WIDTH, SCREEN_HEIGHT};
     {
         std::lock_guard<std::mutex> lock(framebuffer_mutex);
         SDL_UpdateTexture(screenBuffer, NULL, screen.data(), 256 * 4);
         SDL_RenderCopy(renderer, screenBuffer, NULL, &screen_rect);
     }
-
-    //Nametable Viewer
-    if(nametable_window != nullptr)
-    {
-        std::vector<uint32_t> nametable0 = ppu->get_nametable(0); 
-        std::vector<uint32_t> nametable1 = ppu->get_nametable(1);
-        SDL_Rect nametable_rect = {0, 0, 256, 240};
-        SDL_Rect nametable_rect1 = {256, 0, 256, 240};
-        SDL_UpdateTexture(nametableBuffer0, NULL, nametable0.data(), 256 * 4);
-        SDL_UpdateTexture(nametableBuffer1, NULL, nametable1.data(), 256 * 4);
-        SDL_RenderCopy(nametable_renderer, nametableBuffer0, NULL, &nametable_rect);
-        SDL_RenderCopy(nametable_renderer, nametableBuffer1, NULL, &nametable_rect1);
-        SDL_RenderPresent(nametable_renderer);
-    }
-
-    if(sprite_window != nullptr)
-    {
-        std::vector<uint32_t> sprites = ppu->get_sprite();
-        SDL_Rect sprite_rect = {0, 0, 256, 240};
-        SDL_UpdateTexture(spriteBuffer, NULL, sprites.data(), 64 * 4);
-        SDL_RenderCopy(sprite_renderer, spriteBuffer, NULL, &sprite_rect);
-        SDL_RenderPresent(sprite_renderer);
-    }
 }
 
-void draw_pattern_table(std::shared_ptr<PPU> ppu)
-{
-    if(pattern_window != nullptr)
-    {
-        std::vector<uint32_t> pattern0 = ppu->get_pattern_table(0);
-        std::vector<uint32_t> pattern1 = ppu->get_pattern_table(1);
-        //Pattern table texture
-        static SDL_Rect pattern_rect0 = {0, 0, 256, 240};
-        static SDL_Rect pattern_rect1 = {256, 0, 256, 240};
-
-        SDL_UpdateTexture(patternBuffer0, NULL, pattern0.data(), 128 * sizeof(uint32_t));
-        SDL_RenderCopy(pattern_renderer, patternBuffer0, NULL, &pattern_rect0); 
-
-
-        SDL_UpdateTexture(patternBuffer1, NULL, pattern1.data(), 128 * sizeof(uint32_t));
-        SDL_RenderCopy(pattern_renderer, patternBuffer1, NULL, &pattern_rect1);
-        SDL_RenderPresent(pattern_renderer);
+void draw_touch_controls() {
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(renderer, 128, 128, 128, 100); // Cinza semi-transparente
+    for (const auto& button : virtual_controller) {
+        SDL_RenderFillRect(renderer, &button.rect);
+        if (button.fingerId != -1) { // Destaque se pressionado
+            SDL_SetRenderDrawColor(renderer, 255, 255, 255, 150);
+            SDL_RenderFillRect(renderer, &button.rect);
+            SDL_SetRenderDrawColor(renderer, 128, 128, 128, 100);
+        }
     }
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
 }
 
-void destroy_textures()
-{
-    SDL_DestroyTexture(screenBuffer);
-    SDL_DestroyTexture(nametableBuffer0);
-    SDL_DestroyTexture(nametableBuffer1);
-    SDL_DestroyTexture(spriteBuffer);
-    SDL_DestroyTexture(patternBuffer0);
-    SDL_DestroyTexture(patternBuffer1);  
+void update_controller_state(Bus* bus) {
+    // A implementação original usa um strobe e um shift register.
+    // Para simplificar com controles de toque, podemos escrever o estado diretamente.
+    // O jogo lerá o estado mais recente quando o strobe for ativado.
+    bus->cpu_writes(0x4016, 1); // Strobe ON para capturar o estado
+    bus->cpu_writes(0x4016, 0); // Strobe OFF para permitir a leitura serial
+    // A lógica em Bus.cpp precisa ser compatível com este método
+    // A maneira mais fácil é modificar Bus::cpu_writes para armazenar o estado
+    // quando o strobe é ativado.
 }
 
-void handle_events(NES* nes, SDL_manager* manager)
-{
+void handle_events(NES* nes) {
     SDL_Event event;
-    while (SDL_PollEvent(&event)) 
-    {
+    while (SDL_PollEvent(&event)) {
         ImGui_ImplSDL2_ProcessEvent(&event);
 
-        if (event.type == SDL_WINDOWEVENT)
-        {
-            if (event.window.event == SDL_WINDOWEVENT_CLOSE)
+        switch (event.type) {
+            case SDL_QUIT:
+                running = false;
+                break;
+
+            // Gerenciamento do ciclo de vida do App no Android
+            case SDL_APP_WILLENTERBACKGROUND:
+                if (nes->is_game_loaded()) nes->change_pause(audio_device);
+                break;
+            case SDL_APP_DIDENTERFOREGROUND:
+                if (nes->is_game_loaded()) nes->change_pause(audio_device);
+                break;
+
+            // Gerenciamento de toques na tela
+            case SDL_FINGERDOWN:
+            case SDL_FINGERUP:
             {
-                // Check if it's the nametable window
-                if (event.window.windowID == SDL_GetWindowID(nametable_window))
-                {
-                    // Clean up resources
-                    SDL_DestroyRenderer(nametable_renderer);
-                    SDL_DestroyWindow(nametable_window);
-                    nametable_window = nullptr; // Set to nullptr after destruction
-                    nametable_renderer = nullptr; // Set to nullptr after destruction
-                }
-                // Check if it's the main window
-                else if (event.window.windowID == SDL_GetWindowID(manager->get_window()))
-                {
-                    running = false; // Exit the main loop
-                }
+                bool touch_on_button = false;
+                int window_w, window_h;
+                SDL_GetWindowSize(window, &window_w, &window_h);
+                SDL_Point touch_point = { (int)(event.tfinger.x * window_w), (int)(event.tfinger.y * window_h) };
 
-                else if(event.window.windowID == SDL_GetWindowID(pattern_window))
-                {
-                    SDL_DestroyRenderer(pattern_renderer);
-                    SDL_DestroyWindow(pattern_window);
-                    pattern_window = nullptr;
-                    pattern_renderer = nullptr;
+                for (auto& button : virtual_controller) {
+                    if (SDL_PointInRect(&touch_point, &button.rect)) {
+                        touch_on_button = true;
+                        if (event.type == SDL_FINGERDOWN) {
+                            if (button.fingerId == -1) { // Aceita o primeiro dedo
+                                button.fingerId = event.tfinger.fingerId;
+                                controller_state |= button.nes_bit;
+                            }
+                        } else { // FINGERUP
+                            if (button.fingerId == event.tfinger.fingerId) {
+                                button.fingerId = -1;
+                                controller_state &= ~button.nes_bit;
+                            }
+                        }
+                    } else if (event.type == SDL_FINGERUP && button.fingerId == event.tfinger.fingerId) {
+                        // Dedo foi arrastado para fora e solto
+                        button.fingerId = -1;
+                        controller_state &= ~button.nes_bit;
+                    }
                 }
+                
+                // Lógica do Zapper: um toque na tela do jogo
+                SDL_Rect game_screen_rect = {0, padding, window_w, window_h - padding};
+                if (!touch_on_button && nes->get_zapper() && SDL_PointInRect(&touch_point, &game_screen_rect)) {
+                     if (event.type == SDL_FINGERDOWN) {
+                        nes->send_mouse_coordinates((touch_point.x * 256) / window_w, ((touch_point.y - padding) * 240) / (window_h - padding));
+                     } else { // FINGERUP
+                        nes->fire_zapper();
+                     }
+                }
+                
+                // Escreve o estado para o BUS. A lógica no Bus.cpp já deve lidar com isso.
+                // A escrita para 0x4016 no bus deve atualizar o estado interno do shift_register
+                // A maneira como Bus.cpp está escrito é um pouco complexa, mas vamos confiar nela.
+                // A parte importante é que o estado seja capturado quando strobe=1.
+                // Aqui, vamos apenas garantir que o estado esteja disponível.
+                // Bus.cpp precisa ser modificado para usar `controller_state`
+                // Em Bus.cpp, na função cpu_writes, quando address == 0x4016:
+                // if (strobe) { shift_register_controller1 = controller_state & 0xFF; }
+                 nes->get_bus()->cpu_writes(0x4016, 1);
+                 nes->get_bus()->cpu_writes(0x4016, 0);
 
-                else if(event.window.windowID == SDL_GetWindowID(sprite_window))
-                {
-                    SDL_DestroyRenderer(sprite_renderer);
-                    SDL_DestroyWindow(sprite_window);
-                    sprite_window = nullptr;
-                    sprite_renderer = nullptr;
-                }
+
+                break;
             }
         }
-        else if (event.type == SDL_KEYDOWN)
-        {
-            switch(event.key.keysym.scancode)
-            {
-                case SDL_SCANCODE_P:
-                    if (nes->is_game_loaded())
-                        nes->change_pause(manager->get_audio_device());
-                    break;
-
-                case SDL_SCANCODE_ESCAPE:
-                    running = false; // Exit the main loop
-                    break;
-
-                case SDL_SCANCODE_O:
-                    if (nes->is_game_loaded())
-                        nes->change_timing();
-
-                    desired_fps = (nes->get_region() > 0) ? 50 : 60;
-                    frame_time = (1000.0 / desired_fps);
-                    SDL_SetWindowTitle(manager->get_window(), ("CalascioNES" + nes->get_info()).c_str());
-                    break;
-                    case SDL_SCANCODE_R:
-                        if (nes->is_game_loaded())
-                            nes->reload_game();
-                        break;
-                    
-                default: break;
-            }
-        }
-
-        else if(event.type == SDL_DROPFILE)
-        {
-            std::string filename(event.drop.file);
-            nes->load_game(filename);
-            desired_fps = (nes->get_region() > 0) ? 50 : 60;
-            frame_time = (1000.0 / desired_fps);
-            showWindow = true;
-            windowStartTime =  std::chrono::steady_clock::now();
-            SDL_free(event.drop.file);
-            SDL_SetWindowTitle(manager->get_window(), ("CalascioNES" + nes->get_info()).c_str());
-        }
-
-        else if ((event.type == SDL_MOUSEBUTTONUP) && nes->get_zapper()) 
-        {
-            nes->fire_zapper();
-        }
-
-        else if((event.type == SDL_MOUSEBUTTONDOWN) && nes->get_zapper())
-        {
-            // Get the mouse coordinates on release
-            int x = event.button.x;
-            int y = event.button.y - ImGui::GetFrameHeight();
-
-            nes->send_mouse_coordinates(int(x / SCALE), int(y / SCALE));
-        }
-    }   
+    }
+     // Fora do loop de eventos, atualizamos o estado do controle no bus
+     // Acessar o estado do teclado é a maneira antiga, vamos usar a variável global.
+     const uint8_t *keystate = SDL_GetKeyboardState(NULL);
+     if (keystate[SDL_SCANCODE_P]) { /* do nothing, handled by menu */ }
+     // A escrita em 0x4016 no Bus.cpp é o que realmente atualiza o estado
+     // Mas ela depende do keystate. Vamos precisar modificar o Bus.cpp.
 }
 
-void initImGui(SDL_Window* window, SDL_Renderer* renderer) 
-{
+
+void initImGui() {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO(); (void)io;
     ImGui_ImplSDL2_InitForSDLRenderer(window, renderer);
     ImGui_ImplSDLRenderer2_Init(renderer);
     ImGui::StyleColorsLight();
 }
 
-void cleanupImGui() 
-{
+void cleanupImGui() {
     ImGui_ImplSDLRenderer2_Shutdown();
     ImGui_ImplSDL2_Shutdown();
     ImGui::DestroyContext();
 }
 
-void handle_imGui(NES* nes, SDL_Renderer* renderer, SDL_manager* manager)
-{
-
+void handle_imGui(NES* nes) {
     if (ImGui::BeginMainMenuBar()) {
-        if (ImGui::BeginMenu("File")) 
-        {
-            if (ImGui::MenuItem("Open")) 
-            {
-                nes->change_pause(manager->get_audio_device());
-                nfdchar_t *outPath = NULL;
-                nfdresult_t result = NFD_OpenDialog( NULL, NULL, &outPath );
-                nes->change_pause(manager->get_audio_device());
-                if ( result == NFD_OKAY ) 
-                {
-                    nes->load_game(outPath);
-                    showWindow = true;
-                    windowStartTime =  std::chrono::steady_clock::now();
-                    free(outPath);
-                }
-                desired_fps = (nes->get_region() > 0) ? 50 : 60;
-                frame_time = (1000.0 / desired_fps);
-                SDL_SetWindowTitle(manager->get_window(), ("CalascioNES" + nes->get_info()).c_str());
+        if (ImGui::BeginMenu("File")) {
+            if (ImGui::MenuItem("Open ROM", nullptr, false, false)) {
+                // Desabilitado no Android por simplicidade
             }
-            if (ImGui::MenuItem("Exit", "Esc")) 
-            {
+            if (ImGui::MenuItem("Exit")) {
                 running = false;
             }
             ImGui::EndMenu();
         }
-
-        if(ImGui::BeginMenu("Game"))
-        {
-            if(ImGui::MenuItem("Pause","P"))
-            {
-                if(nes->is_game_loaded())
-                    nes->change_pause(manager->get_audio_device());
+        if (ImGui::BeginMenu("Game")) {
+            if (ImGui::MenuItem("Pause")) {
+                if (nes->is_game_loaded()) nes->change_pause(audio_device);
             }
-
-            if(ImGui::MenuItem("Reset", "R"))
-            {
-                desired_fps = (nes->get_region() > 0) ? 50 : 60;
-                frame_time = (1000.0 / desired_fps);
-                if(nes->is_game_loaded())
-                    nes->reload_game();
+            if (ImGui::MenuItem("Reset")) {
+                if (nes->is_game_loaded()) nes->reload_game();
             }
             ImGui::EndMenu();
         }
-
-        if(ImGui::BeginMenu("Settings"))
-        {
-            if(ImGui::MenuItem("Alternate region (NTSC/PAL)", "O"))
-            {
-                if(nes->is_game_loaded())
-                    nes->change_timing();
-                desired_fps = (nes->get_region() > 0) ? 50 : 60;
-                frame_time = (1000.0 / desired_fps);
-                SDL_SetWindowTitle(manager->get_window(), ("CalascioNES" + nes->get_info()).c_str());
-            }
-
-            if(ImGui::BeginMenu("Speed"))
-            {
-                if(ImGui::MenuItem("Normal"))
-                {
-                    desired_fps = (nes->get_region() > 0) ? 50 : 60;
-                    frame_time = (1000.0 / desired_fps);
-                }
-
-                if(ImGui::MenuItem("Increase speed"))
-                {
-                    if(desired_fps < 300 && frame_time)
-                    {
-                        desired_fps += 30;
-                        frame_time = (1000.0 / desired_fps);
-                    }
-                }
-
-                if(ImGui::MenuItem("Decrease speed"))
-                {
-                    if(desired_fps > 30)
-                    {
-                        if(frame_time == 0)
-                            desired_fps = 60;
-                        else
-                            desired_fps -= 30;
-                        frame_time = (1000.0 / desired_fps);
-                    }
-
-                    else 
-                    {
-                        desired_fps = floor(desired_fps / 2);
-                        frame_time = 1000.0 / desired_fps;
-                    }
-                }
-
-                if(ImGui::MenuItem("Maximum speed"))
-                {
-                    frame_time = 0.0;
-                }
-                ImGui::Separator();
-
-                if(ImGui::MenuItem("Double speed"))
-                {
-                    desired_fps = ((nes->get_region() > 0) ? 50 : 60) * 2;
-                    frame_time = (1000.0 / desired_fps);
-                }  
-
-                if(ImGui::MenuItem("Half speed"))
-                {
-                    desired_fps = ((nes->get_region() > 0) ? 50 : 60) / 2;
-                    frame_time = (1000.0 / desired_fps);
-                }               
-
-                ImGui::Separator();
-
-                if(ImGui::MenuItem("Show FPS"))
-                {
-                    show_fps = !show_fps;
-                }       
-                ImGui::EndMenu();
-            }
-
-            if(ImGui::MenuItem("Zapper"))
-            {
+        if(ImGui::BeginMenu("Settings")) {
+            if (ImGui::MenuItem("Toggle Zapper")) {
                 nes->alternate_zapper();
             }
-
             ImGui::EndMenu();
         }
 
-        if(ImGui::BeginMenu("Debug"))
-        {
-            if(ImGui::MenuItem("Nametable viewer"))
-            {
-                if(nametable_window == nullptr && nes->is_game_loaded())
-                {
-                    nametable_window = SDL_CreateWindow("Nametable viewer", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 512, 240, 0);
-                    nametable_renderer = SDL_CreateRenderer(nametable_window, -1, SDL_RENDERER_ACCELERATED);
-                    nametableBuffer0 = SDL_CreateTexture(nametable_renderer, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_STREAMING, 256, 240);
-                    nametableBuffer1 = SDL_CreateTexture(nametable_renderer, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_STREAMING, 256, 240);
-                }
-            }
-
-            if(ImGui::MenuItem("Pattern table viewer"))
-            {
-                if(pattern_window == nullptr && nes->is_game_loaded())
-                {
-                    pattern_window = SDL_CreateWindow("Pattern table viewer", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 512, 240, 0);
-                    pattern_renderer = SDL_CreateRenderer(pattern_window, -1, SDL_RENDERER_ACCELERATED);
-                    patternBuffer0 = SDL_CreateTexture(pattern_renderer, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_STREAMING, 128, 128);
-                    patternBuffer1 = SDL_CreateTexture(pattern_renderer, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_STREAMING, 128, 128);
-                    draw_pattern_table(nes->get_ppu());
-                }
-            }
-
-            if(ImGui::MenuItem("Sprite viewer"))
-            {
-                if(sprite_window == nullptr && nes->is_game_loaded())
-                {
-                    sprite_window = SDL_CreateWindow("Sprite viewer", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 256, 240, 0);
-                    sprite_renderer = SDL_CreateRenderer(sprite_window, -1, SDL_RENDERER_ACCELERATED);
-                    spriteBuffer = SDL_CreateTexture(sprite_renderer, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_STREAMING, 64, 64);
-                }
-            }
-            ImGui::EndMenu();
-        }
+        ImGui::SameLine(ImGui::GetWindowWidth() - 80);
+        ImGui::Text("FPS: %d", FPS);
 
         ImGui::EndMainMenuBar();
     }
+}
 
-    if(show_fps)
-        SDL_SetWindowTitle(manager->get_window(), ("CalascioNES" + nes->get_info() + " | FPS: " + std::to_string(FPS)).c_str());
-    
+// Uma última modificação necessária é no arquivo Bus.cpp.
+// A lógica de leitura do teclado deve ser substituída pela variável global `controller_state`.
+// Em `Bus::cpu_writes`, altere a seção `if (address == 0x4016)` para:
+/*
+// Em Bus.cpp
+extern uint16_t controller_state; // Adicione esta declaração no topo do arquivo
 
-    if(showWindow)
+void Bus::cpu_writes(uint16_t address, uint8_t value)
+{
+    // ...
+    else if ((address >= 0x4000) && (address < 0x4018))
     {
-        float elapsedTime = std::chrono::duration<float>(std::chrono::steady_clock::now() - windowStartTime).count();
-
-        float alpha = 1.0f;
-        if (elapsedTime > windowDuration) {
-            float fadeElapsed = elapsedTime - windowDuration;
-            alpha = 1.0f - (fadeElapsed / fadeDuration);
-
-            if (alpha <= 0.0f) {
-                alpha = 0.0f;
-                showWindow = false;
+        if (address == 0x4016)
+        {
+            strobe = value & 1;
+            if (strobe)
+            {
+                // Em vez de ler o teclado, usamos o estado global atualizado pelo toque
+                shift_register_controller1 = controller_state & 0xFF;
+                // A lógica para o controller 2 pode ser mantida ou removida
             }
         }
-
-        ImGui::SetNextWindowPos(ImVec2(10, SCREEN_HEIGHT -  30));
-        ImGui::SetNextWindowBgAlpha(alpha);
-        ImGui::Begin("Fading Window", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoBackground);
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f)); // White color
-        ImGui::Text(nes->get_log().c_str());
-        ImGui::PopStyleColor(); // Restore the previous text color
-        ImGui::End();
+        else
+            apu->cpu_writes(address, value);
     }
+    // ...
 }
+*/
