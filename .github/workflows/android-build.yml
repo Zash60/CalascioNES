@@ -13,127 +13,175 @@ jobs:
     - name: 1. Checkout do código fonte
       uses: actions/checkout@v4
 
-    - name: 2. Limpar Repositório
+    - name: 2. Limpar e Transformar o Projeto
+      # Usamos o pipe '|' para um bloco de script de múltiplas linhas.
+      # Cada comando de criação de arquivo é executado em sequência.
       run: |
         echo "Deletando arquivos e pastas desnecessários..."
         rm -rf SDL2/ imgui/ nativefiledialog/ temp_structure/
         rm -f makefile SDL2-devel-*.zip SDL2-devel-*.tar.gz
 
-    - name: 3. Reescrever main.cpp
-      uses: jsdaniell/create-file@v1
-      with:
-        name: main.cpp
-        content: |
-          // main.cpp - Versão Nativa sem SDL2
-          #include <android_native_app_glue.h>
-          #include <android/log.h>
-          #include <EGL/egl.h>
-          #include <GLES2/gl2.h>
-          #include "NES.h"
-          #include <thread>
-          #include <mutex>
-          #include <vector>
-          #include <chrono>
-          #include <filesystem>
-          #define LOG_TAG "CalascioNES"
-          #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
-          struct GraphicsEngine { EGLDisplay display = EGL_NO_DISPLAY; EGLSurface surface = EGL_NO_SURFACE; EGLContext context = EGL_NO_CONTEXT; int32_t width = 0; int32_t height = 0; GLuint textureId = 0; GLuint shaderProgram = 0; };
-          std::atomic<bool> running(false); std::mutex framebuffer_mutex; std::shared_ptr<NES> nes;
-          std::vector<uint32_t> screen_buffer(256 * 240, 0xFF000000); uint16_t controller_state = 0;
-          void init_graphics(android_app* app, GraphicsEngine& engine); void term_graphics(GraphicsEngine& engine); void draw_frame(GraphicsEngine& engine);
-          void emulation_thread_func() { while (running) { if (nes && nes->is_game_loaded()) { nes->run_frame(); { std::lock_guard<std::mutex> lock(framebuffer_mutex); screen_buffer = nes->get_ppu()->get_screen(); } } else { std::this_thread::sleep_for(std::chrono::milliseconds(16)); } } }
-          static int32_t handle_input(struct android_app* app, AInputEvent* event) { return 0; }
-          static void handle_cmd(struct android_app* app, int32_t cmd) { GraphicsEngine* engine = (GraphicsEngine*)app->userData; switch (cmd) { case APP_CMD_INIT_WINDOW: if (app->window != NULL) { init_graphics(app, *engine); running = true; } break; case APP_CMD_TERM_WINDOW: term_graphics(*engine); running = false; break; } }
-          void android_main(struct android_app* app) {
-              GraphicsEngine graphics_engine; app->userData = &graphics_engine; app->onAppCmd = handle_cmd; app->onInputEvent = handle_input;
-              nes = std::make_shared<NES>(); std::string rom_path = "/sdcard/CalascioNES/roms/default.nes";
-              if (std::filesystem::exists(rom_path)) { nes->load_game(rom_path); } else { LOGI("ROM padrão não encontrada: %s", rom_path.c_str()); }
-              std::thread emu_thread(emulation_thread_func);
-              while (true) { int events; struct android_poll_source* source; while (ALooper_pollAll(0, nullptr, &events, (void**)&source) >= 0) { if (source != nullptr) source->process(app, source); if (app->destroyRequested != 0) { running = false; emu_thread.join(); return; } } if (running && graphics_engine.display != EGL_NO_DISPLAY) { draw_frame(graphics_engine); } }
-          }
-          const char* VERTEX_SHADER = "attribute vec4 vPosition; attribute vec2 vTexCoord; varying vec2 TexCoord; void main() { gl_Position = vPosition; TexCoord = vTexCoord; }";
-          const char* FRAGMENT_SHADER = "precision mediump float; varying vec2 TexCoord; uniform sampler2D sTexture; void main() { gl_FragColor = texture2D(sTexture, TexCoord); }";
-          GLuint load_shader(GLenum type, const char* shaderSrc) { GLuint shader = glCreateShader(type); glShaderSource(shader, 1, &shaderSrc, NULL); glCompileShader(shader); return shader; }
-          void init_graphics(android_app* app, GraphicsEngine& engine) {
-              const EGLint attribs[] = { EGL_SURFACE_TYPE, EGL_WINDOW_BIT, EGL_BLUE_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_RED_SIZE, 8, EGL_NONE }; EGLint format, numConfigs; EGLConfig config;
-              engine.display = eglGetDisplay(EGL_DEFAULT_DISPLAY); eglInitialize(engine.display, 0, 0);
-              eglChooseConfig(engine.display, attribs, &config, 1, &numConfigs); eglGetConfigAttrib(engine.display, config, EGL_NATIVE_VISUAL_ID, &format);
-              ANativeWindow_setBuffersGeometry(app->window, 0, 0, format); engine.surface = eglCreateWindowSurface(engine.display, config, app->window, NULL);
-              const EGLint context_attribs[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE }; engine.context = eglCreateContext(engine.display, config, NULL, context_attribs);
-              eglMakeCurrent(engine.display, engine.surface, engine.surface, engine.context);
-              eglQuerySurface(engine.display, engine.surface, EGL_WIDTH, &engine.width); eglQuerySurface(engine.display, engine.surface, EGL_HEIGHT, &engine.height);
-              GLuint vertexShader = load_shader(GL_VERTEX_SHADER, VERTEX_SHADER); GLuint fragmentShader = load_shader(GL_FRAGMENT_SHADER, FRAGMENT_SHADER);
-              engine.shaderProgram = glCreateProgram(); glAttachShader(engine.shaderProgram, vertexShader); glAttachShader(engine.shaderProgram, fragmentShader);
-              glLinkProgram(engine.shaderProgram); glUseProgram(engine.shaderProgram);
-              glGenTextures(1, &engine.textureId); glBindTexture(GL_TEXTURE_2D, engine.textureId);
-              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-              glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 256, 240, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-          }
-          void term_graphics(GraphicsEngine& engine) { if (engine.display != EGL_NO_DISPLAY) { eglMakeCurrent(engine.display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT); if (engine.context != EGL_NO_CONTEXT) eglDestroyContext(engine.display, engine.context); if (engine.surface != EGL_NO_SURFACE) eglDestroySurface(engine.display, engine.surface); eglTerminate(engine.display); } engine.display = EGL_NO_DISPLAY; }
-          void draw_frame(GraphicsEngine& engine) {
-              glViewport(0, 0, engine.width, engine.height); glClear(GL_COLOR_BUFFER_BIT);
-              { std::lock_guard<std::mutex> lock(framebuffer_mutex);
-                  glBindTexture(GL_TEXTURE_2D, engine.textureId);
-                  glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 256, 240, GL_RGBA, GL_UNSIGNED_BYTE, screen_buffer.data());
-              }
-              GLfloat vertices[] = { -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f }; GLfloat texCoords[] = { 0.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f };
-              GLint posAttrib = glGetAttribLocation(engine.shaderProgram, "vPosition"); glEnableVertexAttribArray(posAttrib); glVertexAttribPointer(posAttrib, 2, GL_FLOAT, GL_FALSE, 0, vertices);
-              GLint texAttrib = glGetAttribLocation(engine.shaderProgram, "vTexCoord"); glEnableVertexAttribArray(texAttrib); glVertexAttribPointer(texAttrib, 2, GL_FLOAT, GL_FALSE, 0, texCoords);
-              glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-              eglSwapBuffers(engine.display, engine.surface);
-          }
+        echo "Reescrevendo main.cpp para API Nativa..."
+        cat > main.cpp << 'EOF'
+        // main.cpp - Versão Nativa sem SDL2
+        #include <android_native_app_glue.h>
+        #include <android/log.h>
+        #include <EGL/egl.h>
+        #include <GLES2/gl2.h>
+        #include "NES.h"
+        #include <thread>
+        #include <mutex>
+        #include <vector>
+        #include <chrono>
+        #include <filesystem>
 
-    - name: 4. Modificar Bus.cpp e Bus.h
-      run: |
+        #define LOG_TAG "CalascioNES"
+        #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+
+        struct GraphicsEngine { EGLDisplay display = EGL_NO_DISPLAY; EGLSurface surface = EGL_NO_SURFACE; EGLContext context = EGL_NO_CONTEXT; int32_t width = 0; int32_t height = 0; GLuint textureId = 0; GLuint shaderProgram = 0; };
+        std::atomic<bool> running(false);
+        std::mutex framebuffer_mutex;
+        std::shared_ptr<NES> nes;
+        std::vector<uint32_t> screen_buffer(256 * 240, 0xFF000000);
+        uint16_t controller_state = 0;
+
+        void init_graphics(android_app* app, GraphicsEngine& engine);
+        void term_graphics(GraphicsEngine& engine);
+        void draw_frame(GraphicsEngine& engine);
+
+        void emulation_thread_func() {
+            while (running) {
+                if (nes && nes->is_game_loaded()) {
+                    nes->run_frame();
+                    { std::lock_guard<std::mutex> lock(framebuffer_mutex); screen_buffer = nes->get_ppu()->get_screen(); }
+                } else { std::this_thread::sleep_for(std::chrono::milliseconds(16)); }
+            }
+        }
+        static int32_t handle_input(struct android_app* app, AInputEvent* event) { return 0; }
+        static void handle_cmd(struct android_app* app, int32_t cmd) {
+            GraphicsEngine* engine = (GraphicsEngine*)app->userData;
+            switch (cmd) {
+                case APP_CMD_INIT_WINDOW: if (app->window != NULL) { init_graphics(app, *engine); running = true; } break;
+                case APP_CMD_TERM_WINDOW: term_graphics(*engine); running = false; break;
+            }
+        }
+        void android_main(struct android_app* app) {
+            GraphicsEngine graphics_engine; app->userData = &graphics_engine; app->onAppCmd = handle_cmd; app->onInputEvent = handle_input;
+            nes = std::make_shared<NES>();
+            std::string rom_path = "/sdcard/CalascioNES/roms/default.nes";
+            if (std::filesystem::exists(rom_path)) { nes->load_game(rom_path); } else { LOGI("ROM padrão não encontrada: %s", rom_path.c_str()); }
+            std::thread emu_thread(emulation_thread_func);
+            while (true) {
+                int events; struct android_poll_source* source;
+                while (ALooper_pollAll(0, nullptr, &events, (void**)&source) >= 0) {
+                    if (source != nullptr) source->process(app, source);
+                    if (app->destroyRequested != 0) { running = false; emu_thread.join(); return; }
+                }
+                if (running && graphics_engine.display != EGL_NO_DISPLAY) { draw_frame(graphics_engine); }
+            }
+        }
+        const char* VERTEX_SHADER = "attribute vec4 vPosition; attribute vec2 vTexCoord; varying vec2 TexCoord; void main() { gl_Position = vPosition; TexCoord = vTexCoord; }";
+        const char* FRAGMENT_SHADER = "precision mediump float; varying vec2 TexCoord; uniform sampler2D sTexture; void main() { gl_FragColor = texture2D(sTexture, TexCoord); }";
+        GLuint load_shader(GLenum type, const char* shaderSrc) { GLuint shader = glCreateShader(type); glShaderSource(shader, 1, &shaderSrc, NULL); glCompileShader(shader); return shader; }
+        void init_graphics(android_app* app, GraphicsEngine& engine) {
+            const EGLint attribs[] = { EGL_SURFACE_TYPE, EGL_WINDOW_BIT, EGL_BLUE_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_RED_SIZE, 8, EGL_NONE };
+            EGLint format, numConfigs; EGLConfig config;
+            engine.display = eglGetDisplay(EGL_DEFAULT_DISPLAY); eglInitialize(engine.display, 0, 0);
+            eglChooseConfig(engine.display, attribs, &config, 1, &numConfigs); eglGetConfigAttrib(engine.display, config, EGL_NATIVE_VISUAL_ID, &format);
+            ANativeWindow_setBuffersGeometry(app->window, 0, 0, format);
+            engine.surface = eglCreateWindowSurface(engine.display, config, app->window, NULL);
+            const EGLint context_attribs[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
+            engine.context = eglCreateContext(engine.display, config, NULL, context_attribs);
+            eglMakeCurrent(engine.display, engine.surface, engine.surface, engine.context);
+            eglQuerySurface(engine.display, engine.surface, EGL_WIDTH, &engine.width); eglQuerySurface(engine.display, engine.surface, EGL_HEIGHT, &engine.height);
+            GLuint vertexShader = load_shader(GL_VERTEX_SHADER, VERTEX_SHADER);
+            GLuint fragmentShader = load_shader(GL_FRAGMENT_SHADER, FRAGMENT_SHADER);
+            engine.shaderProgram = glCreateProgram();
+            glAttachShader(engine.shaderProgram, vertexShader);
+            glAttachShader(engine.shaderProgram, fragmentShader);
+            glLinkProgram(engine.shaderProgram);
+            glUseProgram(engine.shaderProgram);
+            glGenTextures(1, &engine.textureId);
+            glBindTexture(GL_TEXTURE_2D, engine.textureId);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 256, 240, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        }
+        void term_graphics(GraphicsEngine& engine) {
+            if (engine.display != EGL_NO_DISPLAY) {
+                eglMakeCurrent(engine.display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+                if (engine.context != EGL_NO_CONTEXT) eglDestroyContext(engine.display, engine.context);
+                if (engine.surface != EGL_NO_SURFACE) eglDestroySurface(engine.display, engine.surface);
+                eglTerminate(engine.display);
+            }
+            engine.display = EGL_NO_DISPLAY;
+        }
+        void draw_frame(GraphicsEngine& engine) {
+            glViewport(0, 0, engine.width, engine.height);
+            glClear(GL_COLOR_BUFFER_BIT);
+            {
+                std::lock_guard<std::mutex> lock(framebuffer_mutex);
+                glBindTexture(GL_TEXTURE_2D, engine.textureId);
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 256, 240, GL_RGBA, GL_UNSIGNED_BYTE, screen_buffer.data());
+            }
+            GLfloat vertices[] = { -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f };
+            GLfloat texCoords[] = { 0.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f };
+            GLint posAttrib = glGetAttribLocation(engine.shaderProgram, "vPosition");
+            glEnableVertexAttribArray(posAttrib);
+            glVertexAttribPointer(posAttrib, 2, GL_FLOAT, GL_FALSE, 0, vertices);
+            GLint texAttrib = glGetAttribLocation(engine.shaderProgram, "vTexCoord");
+            glEnableVertexAttribArray(texAttrib);
+            glVertexAttribPointer(texAttrib, 2, GL_FLOAT, GL_FALSE, 0, texCoords);
+            glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+            eglSwapBuffers(engine.display, engine.surface);
+        }
+EOF
+
+        echo "Modificando Bus.cpp e Bus.h..."
         sed -i '/#include "SDL.h"/d' include/Bus.h
         sed -i '1s/^/extern uint16_t controller_state;/' src/Bus.cpp
         awk 'BEGIN {p=1} /if \(address == 0x4016\)/ {print; print "        {"; print "            strobe = value & 1;"; print "            if (strobe) {"; print "                shift_register_controller1 = controller_state & 0xFF;"; print "                shift_register_controller2 = (controller_state >> 8) & 0xFF;"; print "            }"; print "        }"; p=0} /apu->cpu_writes\(address, value\);/ {p=1} p' src/Bus.cpp > src/Bus.cpp.tmp && mv src/Bus.cpp.tmp src/Bus.cpp
 
-    - name: 5. Criar CMakeLists.txt
-      uses: jsdaniell/create-file@v1
-      with:
-        name: CMakeLists.txt
-        content: |
-          cmake_minimum_required(VERSION 3.18)
-          project(CalascioNES CXX)
-          add_library(native_app_glue STATIC ${CMAKE_ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.c)
-          target_include_directories(native_app_glue PUBLIC ${CMAKE_ANDROID_NDK}/sources/android/native_app_glue)
-          file(GLOB_RECURSE EMU_SOURCES "src/*.cpp")
-          add_library(calasciones SHARED main.cpp ${EMU_SOURCES})
-          target_include_directories(calasciones PUBLIC include ${CMAKE_ANDROID_NDK}/sources/android/native_app_glue)
-          target_compile_options(calasciones PRIVATE -O3 -flto -march=native -fomit-frame-pointer -funroll-loops -Wall -Wno-unused-variable -Wno-unused-parameter -Wno-narrowing)
-          target_link_libraries(calasciones EGL GLESv2 OpenSLES android native_app_glue log)
+        echo "Criando CMakeLists.txt..."
+        cat > CMakeLists.txt << 'EOF'
+        cmake_minimum_required(VERSION 3.18)
+        project(CalascioNES CXX)
+        add_library(native_app_glue STATIC ${CMAKE_ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.c)
+        target_include_directories(native_app_glue PUBLIC ${CMAKE_ANDROID_NDK}/sources/android/native_app_glue)
+        file(GLOB_RECURSE EMU_SOURCES "src/*.cpp")
+        add_library(calasciones SHARED main.cpp ${EMU_SOURCES})
+        target_include_directories(calasciones PUBLIC include ${CMAKE_ANDROID_NDK}/sources/android/native_app_glue)
+        target_compile_options(calasciones PRIVATE -O3 -flto -march=native -fomit-frame-pointer -funroll-loops -Wall -Wno-unused-variable -Wno-unused-parameter -Wno-narrowing)
+        target_link_libraries(calasciones EGL GLESv2 OpenSLES android native_app_glue log)
+EOF
 
-    - name: 6. Criar build.sh
-      uses: jsdaniell/create-file@v1
-      with:
-        name: build.sh
-        content: |
-          #!/bin/bash
-          set -e
-          rm -rf build/ app/
-          echo "Compilando C++..."
-          NDK_PATH=$(find $PREFIX -name "android.toolchain.cmake" 2>/dev/null | head -n 1)
-          if [ -z "$NDK_PATH" ]; then echo "ERRO: android.toolchain.cmake não encontrado." >&2; exit 1; fi
-          cmake -B build -G "Ninja" -DCMAKE_TOOLCHAIN_FILE="$NDK_PATH" -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=24 -DCMAKE_BUILD_TYPE=Release
-          cmake --build build
-          echo "Preparando APK..."
-          mkdir -p app/lib/arm64-v8a
-          cp build/libcalasciones.so app/lib/arm64-v8a/
-          cat > app/AndroidManifest.xml <<EOM
-          <?xml version="1.0" encoding="utf-8"?><manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.franco1262.calasciones"><uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="28" /><application android:hasCode="false" android:label="CalascioNES"><activity android:name="android.app.NativeActivity" android:exported="true" android:screenOrientation="landscape"><meta-data android:name="android.app.lib_name" android:value="calasciones" /><intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter></activity></application></manifest>
-          EOM
-          echo "Empacotando e assinando APK..."
-          ANDROID_JAR=$(find $PREFIX/share/android-sdk -name "android.jar")
-          aapt2 link -I $ANDROID_JAR --manifest app/AndroidManifest.xml -o CalascioNES.apk
-          cd app && zip -r ../CalascioNES.apk lib && cd ..
-          if [ ! -f "debug.keystore" ]; then keytool -genkey -v -keystore debug.keystore -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US" -storepass android -keypass android; fi
-          apksigner sign --ks debug.keystore --ks-key-alias androiddebugkey --ks-pass pass:android CalascioNES.apk
-          echo -e "\nSUCESSO! APK gerado: $(pwd)/CalascioNES.apk"
-    - name: 7. Tornar build.sh executável
-      run: chmod +x build.sh
+        echo "Criando build.sh..."
+        cat > build.sh << 'EOF'
+        #!/bin/bash
+        set -e
+        rm -rf build/ app/
+        echo "Compilando C++..."
+        NDK_PATH=$(find $PREFIX -name "android.toolchain.cmake" 2>/dev/null | head -n 1)
+        if [ -z "$NDK_PATH" ]; then echo "ERRO: android.toolchain.cmake não encontrado." >&2; exit 1; fi
+        cmake -B build -G "Ninja" -DCMAKE_TOOLCHAIN_FILE="$NDK_PATH" -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=24 -DCMAKE_BUILD_TYPE=Release
+        cmake --build build
+        echo "Preparando APK..."
+        mkdir -p app/lib/arm64-v8a
+        cp build/libcalasciones.so app/lib/arm64-v8a/
+        cat > app/AndroidManifest.xml <<EOM
+        <?xml version="1.0" encoding="utf-8"?><manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.franco1262.calasciones"><uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="28" /><application android:hasCode="false" android:label="CalascioNES"><activity android:name="android.app.NativeActivity" android:exported="true" android:screenOrientation="landscape"><meta-data android:name="android.app.lib_name" android:value="calasciones" /><intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter></activity></application></manifest>
+EOM
+        echo "Empacotando e assinando APK..."
+        ANDROID_JAR=$(find $PREFIX/share/android-sdk -name "android.jar")
+        aapt2 link -I $ANDROID_JAR --manifest app/AndroidManifest.xml -o CalascioNES.apk
+        cd app && zip -r ../CalascioNES.apk lib && cd ..
+        if [ ! -f "debug.keystore" ]; then keytool -genkey -v -keystore debug.keystore -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US" -storepass android -keypass android; fi
+        apksigner sign --ks debug.keystore --ks-key-alias androiddebugkey --ks-pass pass:android CalascioNES.apk
+        echo -e "\nSUCESSO! APK gerado: $(pwd)/CalascioNES.apk"
+EOF
+        chmod +x build.sh
 
-    - name: 8. Fazer Commit e Push das Mudanças
+    - name: 3. Fazer Commit e Push das Mudanças
       run: |
         git config --global user.name "GitHub Actions Bot"
         git config --global user.email "github-actions-bot@github.com"
