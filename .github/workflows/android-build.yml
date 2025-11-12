@@ -18,26 +18,16 @@ jobs:
       with:
         distribution: 'zulu'
         java-version: '17'
-    - name: Configurar Android SDK
-      uses: android-actions/setup-android@v3
-    - name: Configurar Android NDK
-      uses: nttld/setup-ndk@v1
+    - uses: android-actions/setup-android@v3
+    - uses: nttld/setup-ndk@v1
       with:
         ndk-version: r25c
 
     - name: 3. Preparar Dependências
       run: |
-        echo "Limpando arquivos temporários..."
         rm -rf temp_structure SDL2.zip SDL2-devel-*.zip
-
-        echo "Verificando e baixando dependências se necessário..."
-        if [ ! -d "imgui" ]; then
-          echo "Clonando ImGui..."
-          git clone --depth 1 -b docking https://github.com/ocornut/imgui.git
-        fi
-        
+        if [ ! -d "imgui" ]; then git clone --depth 1 -b docking https://github.com/ocornut/imgui.git; fi
         if [ ! -d "SDL2" ]; then
-          echo "Baixando e extraindo SDL2 (versão fonte)..."
           wget https://github.com/libsdl-org/SDL/archive/refs/tags/release-2.30.2.zip -O SDL2.zip
           unzip SDL2.zip
           mv SDL-release-2.30.2 SDL2
@@ -45,138 +35,89 @@ jobs:
 
     - name: 4. Criar Estrutura Android e Gerar Arquivos de Build
       run: |
-        echo "Criando estrutura de pastas para a compilação..."
         mkdir -p build_dir/app/src/main/cpp
-        
-        echo "Movendo código fonte e dependências para a estrutura de build..."
         mv src build_dir/app/src/main/cpp/CalascioNES_src
         mv include build_dir/app/src/main/cpp/CalascioNES_include
         mv main.cpp build_dir/app/src/main/cpp/main.cpp
         mv imgui build_dir/app/src/main/cpp/ImGui
         mv SDL2 build_dir/app/src/main/cpp/SDL2
 
-        echo "Gerando AndroidManifest.xml..."
         cat <<EOF > build_dir/app/src/main/AndroidManifest.xml
-        <?xml version="1.0" encoding="utf-8"?>
-        <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-            <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
-            <application android:label="CalascioNES" android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
-                <activity android:name="org.libsdl.app.SDLActivity" android:exported="true" android:screenOrientation="landscape">
-                    <intent-filter>
-                        <action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" />
-                    </intent-filter>
-                </activity>
-            </application>
-        </manifest>
+        <?xml version="1.0" encoding="utf-8"?><manifest xmlns:android="http://schemas.android.com/apk/res/android"><uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="28" /><application android:label="CalascioNES" android:theme="@android:style/Theme.NoTitleBar.Fullscreen"><activity android:name="org.libsdl.app.SDLActivity" android:exported="true" android:screenOrientation="landscape"><intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter></activity></application></manifest>
         EOF
-
-        echo "Gerando settings.gradle..."
         cat <<EOF > build_dir/settings.gradle
-        pluginManagement {
-            repositories {
-                google()
-                mavenCentral()
-                gradlePluginPortal()
-            }
-        }
-        dependencyResolutionManagement {
-            repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
-            repositories {
-                google()
-                mavenCentral()
-            }
-        }
-        rootProject.name = "CalascioNES"
-        include ':app'
+        pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal(); } }
+        dependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral(); } }
+        rootProject.name = "CalascioNES"; include ':app'
         EOF
-
-        echo "Gerando build.gradle (nível do projeto)..."
         cat <<EOF > build_dir/build.gradle
-        plugins {
-            id 'com.android.application' version '8.2.0' apply false
-        }
+        plugins { id 'com.android.application' version '8.2.0' apply false }
         EOF
-
-        echo "Gerando build.gradle (nível do app)..."
         cat <<EOF > build_dir/app/build.gradle
-        plugins {
-            id 'com.android.application'
-        }
+        plugins { id 'com.android.application' }
         android {
             namespace "com.franco1262.calasciones"
             compileSdk 34
-            defaultConfig {
-                applicationId "com.franco1262.calasciones"
-                minSdk 21
-                targetSdk 34
-                versionCode 1
-                versionName "1.0"
-            }
-            externalNativeBuild {
-                cmake {
-                    path "src/main/cpp/CMakeLists.txt"
-                    version "3.22.1"
-                }
-            }
+            defaultConfig { applicationId "com.franco1262.calasciones"; minSdk 21; targetSdk 34; versionCode 1; versionName "1.0"; }
+            externalNativeBuild { cmake { path "src/main/cpp/CMakeLists.txt"; version "3.22.1"; } }
         }
         EOF
 
-        echo "Gerando CMakeLists.txt completo e corrigido..."
-        cat <<'EOF' > build_dir/app/src/main/cpp/CMakeLists.txt
-        cmake_minimum_required(VERSION 3.18)
-        project(CalascioNES C CXX)
+    - name: 4.1. Gerar CMakeLists.txt
+      uses: jsdaniell/create-file@v1
+      with:
+        name: build_dir/app/src/main/cpp/CMakeLists.txt
+        content: |
+          cmake_minimum_required(VERSION 3.18)
+          project(CalascioNES C CXX)
 
-        # --- Construir SDL2 a partir dos fontes ---
-        set(SDL2_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/SDL2)
-        file(GLOB_RECURSE SDL2_SOURCES
-            "${SDL2_SRC_DIR}/src/atomic/*.c"
-            "${SDL2_SRC_DIR}/src/audio/*.c"
-            "${SDL2_SRC_DIR}/src/core/android/*.c"
-            "${SDL2_SRC_DIR}/src/cpuinfo/*.c"
-            "${SDL2_SRC_DIR}/src/dynapi/*.c"
-            "${SDL2_SRC_DIR}/src/events/*.c"
-            "${SDL2_SRC_DIR}/src/file/*.c"
-            "${SDL2_SRC_DIR}/src/haptic/android/*.c"
-            "${SDL2_SRC_DIR}/src/joystick/android/*.c"
-            "${SDL2_SRC_DIR}/src/power/android/*.c"
-            "${SDL2_SRC_DIR}/src/render/opengles2/*.c"
-            "${SDL2_SRC_DIR}/src/stdlib/*.c"
-            "${SDL2_SRC_DIR}/src/thread/*.c"
-            "${SDL2_SRC_DIR}/src/timer/*.c"
-            "${SDL2_SRC_DIR}/src/video/android/*.c"
-            "${SDL2_SRC_DIR}/src/filesystem/android/*.c"
-        )
-        add_library(SDL2 STATIC ${SDL2_SOURCES})
-        target_include_directories(SDL2 PUBLIC ${SDL2_SRC_DIR}/include)
-        target_compile_definitions(SDL2 PRIVATE -DUSING_GENERATED_CONFIG_H)
+          set(SDL2_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/SDL2)
+          file(GLOB_RECURSE SDL2_SOURCES
+              "${SDL2_SRC_DIR}/src/atomic/*.c"
+              "${SDL2_SRC_DIR}/src/audio/*.c"
+              "${SDL2_SRC_DIR}/src/core/android/*.c"
+              "${SDL2_SRC_DIR}/src/cpuinfo/*.c"
+              "${SDL2_SRC_DIR}/src/dynapi/*.c"
+              "${SDL2_SRC_DIR}/src/events/*.c"
+              "${SDL2_SRC_DIR}/src/file/*.c"
+              "${SDL2_SRC_DIR}/src/haptic/android/*.c"
+              "${SDL2_SRC_DIR}/src/joystick/android/*.c"
+              "${SDL2_SRC_DIR}/src/power/android/*.c"
+              "${SDL2_SRC_DIR}/src/render/opengles2/*.c"
+              "${SDL2_SRC_DIR}/src/stdlib/*.c"
+              "${SDL2_SRC_DIR}/src/thread/*.c"
+              "${SDL2_SRC_DIR}/src/timer/*.c"
+              "${SDL2_SRC_DIR}/src/video/android/*.c"
+              "${SDL2_SRC_DIR}/src/filesystem/android/*.c"
+          )
+          add_library(SDL2 STATIC ${SDL2_SOURCES})
+          target_include_directories(SDL2 PUBLIC ${SDL2_SRC_DIR}/include)
+          target_compile_definitions(SDL2 PRIVATE -DUSING_GENERATED_CONFIG_H)
 
-        # --- Coletar os fontes do emulador e do ImGui ---
-        file(GLOB EMU_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/CalascioNES_src/*.cpp")
-        
-        set(IMGUI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ImGui)
-        file(GLOB IMGUI_SOURCES
-            "${IMGUI_DIR}/*.cpp"
-            "${IMGUI_DIR}/backends/imgui_impl_sdl2.cpp"
-            "${IMGUI_DIR}/backends/imgui_impl_sdlrenderer2.cpp"
-        )
-        
-        # --- Construir a biblioteca principal do emulador ---
-        add_library(calasciones SHARED
-            ${EMU_SOURCES}
-            ${IMGUI_SOURCES}
-            "${CMAKE_CURRENT_SOURCE_DIR}/main.cpp"
-        )
+          file(GLOB EMU_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/CalascioNES_src/*.cpp")
+          
+          set(IMGUI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ImGui)
+          file(GLOB IMGUI_SOURCES
+              "${IMGUI_DIR}/*.cpp"
+              "${IMGUI_DIR}/backends/imgui_impl_sdl2.cpp"
+              "${IMGUI_DIR}/backends/imgui_impl_sdlrenderer2.cpp"
+          )
+          
+          add_library(calasciones SHARED
+              ${EMU_SOURCES}
+              ${IMGUI_SOURCES}
+              "${CMAKE_CURRENT_SOURCE_DIR}/main.cpp"
+          )
 
-        target_include_directories(calasciones PUBLIC
-            ${CMAKE_CURRENT_SOURCE_DIR}/CalascioNES_include
-            ${IMGUI_DIR}
-            ${IMGUI_DIR}/backends
-        )
-        
-        target_compile_options(calasciones PRIVATE -O3 -flto -march=native -fomit-frame-pointer -funroll-loops -Wall -Wno-unused-variable -Wno-unused-parameter -Wno-narrowing)
-        
-        target_link_libraries(calasciones SDL2 android log GLESv2 OpenSLES)
-EOF
+          target_include_directories(calasciones PUBLIC
+              ${CMAKE_CURRENT_SOURCE_DIR}/CalascioNES_include
+              ${IMGUI_DIR}
+              ${IMGUI_DIR}/backends
+          )
+          
+          target_compile_options(calasciones PRIVATE -O3 -flto -march=native -fomit-frame-pointer -funroll-loops -Wall -Wno-unused-variable -Wno-unused-parameter -Wno-narrowing)
+          
+          target_link_libraries(calasciones SDL2 android log GLESv2 OpenSLES)
 
     - name: 5. Compilar o APK
       run: |
