@@ -1,134 +1,216 @@
-name: Build CalascioNES APK
+name: Transform Project to Android Native
 
 on:
-  push:
-    branches: [ "master", "main" ]
+  # Permite a execução manual a partir da aba "Actions"
   workflow_dispatch:
 
 jobs:
-  build-android:
+  transform-and-commit:
     runs-on: ubuntu-latest
+
+    # Permissão para a Action fazer push no repositório
+    permissions:
+      contents: write
 
     steps:
     - name: 1. Checkout do código fonte
       uses: actions/checkout@v4
 
-    - name: 2. Configurar JDK, SDK e NDK
-      uses: actions/setup-java@v4
-      with:
-        distribution: 'zulu'
-        java-version: '17'
-    - name: Configurar Android SDK
-      uses: android-actions/setup-android@v3
-    - name: Configurar Android NDK
-      uses: nttld/setup-ndk@v1
-      with:
-        ndk-version: r25c
-
-    - name: 3. Preparar Dependências
+    - name: 2. Limpar repositório de arquivos antigos
       run: |
-        rm -rf temp_structure SDL2.zip SDL2-devel-*.zip
-        if [ ! -d "imgui" ]; then git clone --depth 1 -b docking https://github.com/ocornut/imgui.git; fi
-        if [ ! -d "SDL2" ]; then
-          wget https://github.com/libsdl-org/SDL/archive/refs/tags/release-2.30.2.zip -O SDL2.zip
-          unzip SDL2.zip
-          mv SDL-release-2.30.2 SDL2
-        fi
+        echo "Deletando arquivos e pastas desnecessários..."
+        rm -rf SDL2/ imgui/ nativefiledialog/ temp_structure/
+        rm -f makefile SDL2-devel-*.zip SDL2-devel-*.tar.gz
 
-    - name: 4. Criar Estrutura Android e Gerar Arquivos de Build
+    - name: 3. Reescrever main.cpp para API Nativa
+      uses: jsdaniell/create-file@v1
+      with:
+        name: main.cpp
+        content: |
+          // main.cpp - Versão Nativa sem SDL2
+          #include <android_native_app_glue.h>
+          #include <android/log.h>
+          #include <EGL/egl.h>
+          #include <GLES2/gl2.h>
+          #include <SLES/OpenSLES.h>
+          #include <SLES/OpenSLES_Android.h>
+          #include "NES.h"
+          #include <thread>
+          #include <mutex>
+          #include <vector>
+          #include <chrono>
+          #include <filesystem>
+
+          #define LOG_TAG "CalascioNES"
+          #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+
+          struct GraphicsEngine { EGLDisplay display = EGL_NO_DISPLAY; EGLSurface surface = EGL_NO_SURFACE; EGLContext context = EGL_NO_CONTEXT; int32_t width = 0; int32_t height = 0; GLuint textureId = 0; GLuint shaderProgram = 0; };
+          struct AudioEngine { /* Stubs */ };
+
+          std::atomic<bool> running(false);
+          std::mutex framebuffer_mutex;
+          std::shared_ptr<NES> nes;
+          std::vector<uint32_t> screen_buffer(256 * 240, 0xFF000000);
+          uint16_t controller_state = 0;
+
+          void init_graphics(android_app* app, GraphicsEngine& engine);
+          void term_graphics(GraphicsEngine& engine);
+          void draw_frame(GraphicsEngine& engine);
+
+          void emulation_thread_func() {
+              while (running) {
+                  if (nes && nes->is_game_loaded()) {
+                      nes->run_frame();
+                      { std::lock_guard<std::mutex> lock(framebuffer_mutex); screen_buffer = nes->get_ppu()->get_screen(); }
+                  } else { std::this_thread::sleep_for(std::chrono::milliseconds(16)); }
+              }
+          }
+          static int32_t handle_input(struct android_app* app, AInputEvent* event) { return 0; }
+          static void handle_cmd(struct android_app* app, int32_t cmd) {
+              GraphicsEngine* engine = (GraphicsEngine*)app->userData;
+              switch (cmd) {
+                  case APP_CMD_INIT_WINDOW: if (app->window != NULL) { init_graphics(app, *engine); running = true; } break;
+                  case APP_CMD_TERM_WINDOW: term_graphics(*engine); running = false; break;
+              }
+          }
+          void android_main(struct android_app* app) {
+              GraphicsEngine graphics_engine; app->userData = &graphics_engine; app->onAppCmd = handle_cmd; app->onInputEvent = handle_input;
+              nes = std::make_shared<NES>();
+              std::string rom_path = "/sdcard/CalascioNES/roms/default.nes";
+              if (std::filesystem::exists(rom_path)) { nes->load_game(rom_path); } else { LOGI("ROM padrão não encontrada: %s", rom_path.c_str()); }
+              std::thread emu_thread(emulation_thread_func);
+              while (true) {
+                  int events; struct android_poll_source* source;
+                  while (ALooper_pollAll(0, nullptr, &events, (void**)&source) >= 0) {
+                      if (source != nullptr) source->process(app, source);
+                      if (app->destroyRequested != 0) { running = false; emu_thread.join(); return; }
+                  }
+                  if (running && graphics_engine.display != EGL_NO_DISPLAY) { draw_frame(graphics_engine); }
+              }
+          }
+          const char* VERTEX_SHADER = "attribute vec4 vPosition; attribute vec2 vTexCoord; varying vec2 TexCoord; void main() { gl_Position = vPosition; TexCoord = vTexCoord; }";
+          const char* FRAGMENT_SHADER = "precision mediump float; varying vec2 TexCoord; uniform sampler2D sTexture; void main() { gl_FragColor = texture2D(sTexture, TexCoord); }";
+          GLuint load_shader(GLenum type, const char* shaderSrc) { GLuint shader = glCreateShader(type); glShaderSource(shader, 1, &shaderSrc, NULL); glCompileShader(shader); return shader; }
+          void init_graphics(android_app* app, GraphicsEngine& engine) {
+              const EGLint attribs[] = { EGL_SURFACE_TYPE, EGL_WINDOW_BIT, EGL_BLUE_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_RED_SIZE, 8, EGL_NONE };
+              EGLint format, numConfigs; EGLConfig config;
+              engine.display = eglGetDisplay(EGL_DEFAULT_DISPLAY); eglInitialize(engine.display, 0, 0);
+              eglChooseConfig(engine.display, attribs, &config, 1, &numConfigs); eglGetConfigAttrib(engine.display, config, EGL_NATIVE_VISUAL_ID, &format);
+              ANativeWindow_setBuffersGeometry(app->window, 0, 0, format);
+              engine.surface = eglCreateWindowSurface(engine.display, config, app->window, NULL);
+              const EGLint context_attribs[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
+              engine.context = eglCreateContext(engine.display, config, NULL, context_attribs);
+              eglMakeCurrent(engine.display, engine.surface, engine.surface, engine.context);
+              eglQuerySurface(engine.display, engine.surface, EGL_WIDTH, &engine.width); eglQuerySurface(engine.display, engine.surface, EGL_HEIGHT, &engine.height);
+              GLuint vertexShader = load_shader(GL_VERTEX_SHADER, VERTEX_SHADER); GLuint fragmentShader = load_shader(GL_FRAGMENT_SHADER, FRAGMENT_SHADER);
+              engine.shaderProgram = glCreateProgram(); glAttachShader(engine.shaderProgram, vertexShader); glAttachShader(engine.shaderProgram, fragmentShader);
+              glLinkProgram(engine.shaderProgram); glUseProgram(engine.shaderProgram);
+              glGenTextures(1, &engine.textureId); glBindTexture(GL_TEXTURE_2D, engine.textureId);
+              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+              glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 256, 240, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+          }
+          void term_graphics(GraphicsEngine& engine) { if (engine.display != EGL_NO_DISPLAY) { eglMakeCurrent(engine.display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT); if (engine.context != EGL_NO_CONTEXT) eglDestroyContext(engine.display, engine.context); if (engine.surface != EGL_NO_SURFACE) eglDestroySurface(engine.display, engine.surface); eglTerminate(engine.display); } engine.display = EGL_NO_DISPLAY; }
+          void draw_frame(GraphicsEngine& engine) {
+              glViewport(0, 0, engine.width, engine.height); glClear(GL_COLOR_BUFFER_BIT);
+              { std::lock_guard<std::mutex> lock(framebuffer_mutex);
+                  glBindTexture(GL_TEXTURE_2D, engine.textureId);
+                  glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 256, 240, GL_RGBA, GL_UNSIGNED_BYTE, screen_buffer.data());
+              }
+              GLfloat vertices[] = { -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f };
+              GLfloat texCoords[] = { 0.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f };
+              GLint posAttrib = glGetAttribLocation(engine.shaderProgram, "vPosition"); glEnableVertexAttribArray(posAttrib);
+              glVertexAttribPointer(posAttrib, 2, GL_FLOAT, GL_FALSE, 0, vertices);
+              GLint texAttrib = glGetAttribLocation(engine.shaderProgram, "vTexCoord"); glEnableVertexAttribArray(texAttrib);
+              glVertexAttribPointer(texAttrib, 2, GL_FLOAT, GL_FALSE, 0, texCoords);
+              glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+              eglSwapBuffers(engine.display, engine.surface);
+          }
+
+    - name: 4. Modificar Bus.cpp e Bus.h
       run: |
-        mkdir -p build_dir/app/src/main/cpp
-        mv src build_dir/app/src/main/cpp/CalascioNES_src
-        mv include build_dir/app/src/main/cpp/CalascioNES_include
-        mv main.cpp build_dir/app/src/main/cpp/main.cpp
-        mv imgui build_dir/app/src/main/cpp/ImGui
-        mv SDL2 build_dir/app/src/main/cpp/SDL2
+        # Remove a dependência do SDL no arquivo de cabeçalho
+        sed -i '/#include "SDL.h"/d' include/Bus.h
+        
+        # Adiciona a declaração 'extern' no topo do arquivo .cpp
+        sed -i '1s/^/extern uint16_t controller_state;/' src/Bus.cpp
 
-        cat <<EOF > build_dir/app/src/main/AndroidManifest.xml
-        <?xml version="1.0" encoding="utf-8"?><manifest xmlns:android="http://schemas.android.com/apk/res/android"><uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="28" /><application android:label="CalascioNES" android:theme="@android:style/Theme.NoTitleBar.Fullscreen"><activity android:name="org.libsdl.app.SDLActivity" android:exported="true" android:screenOrientation="landscape"><intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter></activity></application></manifest>
-        EOF
-        cat <<EOF > build_dir/settings.gradle
-        pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal(); } }
-        dependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral(); } }
-        rootProject.name = "CalascioNES"; include ':app'
-        EOF
-        cat <<EOF > build_dir/build.gradle
-        plugins { id 'com.android.application' version '8.2.0' apply false }
-        EOF
-        cat <<EOF > build_dir/app/build.gradle
-        plugins { id 'com.android.application' }
-        android {
-            namespace "com.franco1262.calasciones"
-            compileSdk 34
-            defaultConfig { applicationId "com.franco1262.calasciones"; minSdk 21; targetSdk 34; versionCode 1; versionName "1.0"; }
-            externalNativeBuild { cmake { path "src/main/cpp/CMakeLists.txt"; version "3.22.1"; } }
-        }
-        EOF
+        # Substitui a lógica de leitura do teclado por uma que usa a variável global
+        awk '
+          BEGIN { in_block = 0; }
+          /if \(address == 0x4016\)/ {
+            print;
+            print "        {";
+            print "            strobe = value & 1;";
+            print "            if (strobe)";
+            print "            {";
+            print "                shift_register_controller1 = controller_state & 0xFF;";
+            print "                shift_register_controller2 = (controller_state >> 8) & 0xFF;";
+            print "            }";
+            print "        }";
+            in_block = 1;
+            next;
+          }
+          /apu->cpu_writes\(address, value\);/ {
+            in_block = 0;
+          }
+          !in_block { print; }
+        ' src/Bus.cpp > src/Bus.cpp.tmp && mv src/Bus.cpp.tmp src/Bus.cpp
 
-        # Usando um bloco de script bash dedicado para criar o CMakeLists.txt de forma robusta
-        bash -c "cat > build_dir/app/src/main/cpp/CMakeLists.txt" <<'EOF'
+    - name: 5. Criar novos arquivos de build (CMakeLists.txt e build.sh)
+      run: |
+        # Criar CMakeLists.txt
+        cat << 'EOF' > CMakeLists.txt
         cmake_minimum_required(VERSION 3.18)
-        project(CalascioNES C CXX)
-
-        set(SDL2_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/SDL2)
-        file(GLOB_RECURSE SDL2_SOURCES
-            "${SDL2_SRC_DIR}/src/*.c"
-            "${SDL2_SRC_DIR}/src/atomic/*.c"
-            "${SDL2_SRC_DIR}/src/audio/*.c"
-            "${SDL2_SRC_DIR}/src/core/android/*.c"
-            "${SDL2_SRC_DIR}/src/cpuinfo/*.c"
-            "${SDL2_SRC_DIR}/src/dynapi/*.c"
-            "${SDL2_SRC_DIR}/src/events/*.c"
-            "${SDL2_SRC_DIR}/src/file/*.c"
-            "${SDL2_SRC_DIR}/src/haptic/android/*.c"
-            "${SDL2_SRC_DIR}/src/joystick/android/*.c"
-            "${SDL2_SRC_DIR}/src/power/android/*.c"
-            "${SDL2_SRC_DIR}/src/render/opengles2/*.c"
-            "${SDL2_SRC_DIR}/src/stdlib/*.c"
-            "${SDL2_SRC_DIR}/src/thread/*.c"
-            "${SDL2_SRC_DIR}/src/timer/*.c"
-            "${SDL2_SRC_DIR}/src/video/android/*.c"
-            "${SDL2_SRC_DIR}/src/filesystem/android/*.c"
-        )
-        add_library(SDL2 STATIC ${SDL2_SOURCES})
-        target_include_directories(SDL2 PUBLIC ${SDL2_SRC_DIR}/include)
-        target_compile_definitions(SDL2 PRIVATE -DUSING_GENERATED_CONFIG_H)
-
-        file(GLOB EMU_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/CalascioNES_src/*.cpp")
-        
-        set(IMGUI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ImGui)
-        file(GLOB IMGUI_SOURCES
-            "${IMGUI_DIR}/*.cpp"
-            "${IMGUI_DIR}/backends/imgui_impl_sdl2.cpp"
-            "${IMGUI_DIR}/backends/imgui_impl_sdlrenderer2.cpp"
-        )
-        
-        add_library(calasciones SHARED
-            ${EMU_SOURCES}
-            ${IMGUI_SOURCES}
-            "${CMAKE_CURRENT_SOURCE_DIR}/main.cpp"
-        )
-
-        target_include_directories(calasciones PUBLIC
-            ${CMAKE_CURRENT_SOURCE_DIR}/CalascioNES_include
-            ${IMGUI_DIR}
-            ${IMGUI_DIR}/backends
-        )
-        
+        project(CalascioNES CXX)
+        add_library(native_app_glue STATIC ${CMAKE_ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.c)
+        target_include_directories(native_app_glue PUBLIC ${CMAKE_ANDROID_NDK}/sources/android/native_app_glue)
+        file(GLOB_RECURSE EMU_SOURCES "src/*.cpp")
+        add_library(calasciones SHARED main.cpp ${EMU_SOURCES})
+        target_include_directories(calasciones PUBLIC include ${CMAKE_ANDROID_NDK}/sources/android/native_app_glue)
         target_compile_options(calasciones PRIVATE -O3 -flto -march=native -fomit-frame-pointer -funroll-loops -Wall -Wno-unused-variable -Wno-unused-parameter -Wno-narrowing)
-        
-        target_link_libraries(calasciones SDL2 android log GLESv2 OpenSLES)
-EOF
+        target_link_libraries(calasciones EGL GLESv2 OpenSLES android native_app_glue log)
+        EOF
 
-    - name: 5. Compilar o APK
+        # Criar build.sh para uso futuro no Termux
+        cat << 'EOF' > build.sh
+        #!/bin/bash
+        set -e
+        rm -rf build/ app/
+        echo "Compilando C++..."
+        NDK_PATH=$(find $PREFIX -name "android.toolchain.cmake" 2>/dev/null | head -n 1)
+        if [ -z "$NDK_PATH" ]; then
+            echo "ERRO: android.toolchain.cmake não encontrado." >&2; exit 1
+        fi
+        cmake -B build -G "Ninja" -DCMAKE_TOOLCHAIN_FILE="$NDK_PATH" -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=24 -DCMAKE_BUILD_TYPE=Release
+        cmake --build build
+        echo "Preparando APK..."
+        mkdir -p app/lib/arm64-v8a
+        cp build/libcalasciones.so app/lib/arm64-v8a/
+        cat > app/AndroidManifest.xml <<EOM
+        <?xml version="1.0" encoding="utf-8"?><manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.franco1262.calasciones"><uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="28" /><application android:hasCode="false" android:label="CalascioNES"><activity android:name="android.app.NativeActivity" android:exported="true" android:screenOrientation="landscape"><meta-data android:name="android.app.lib_name" android:value="calasciones" /><intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter></activity></application></manifest>
+        EOM
+        echo "Empacotando e assinando APK..."
+        ANDROID_JAR=$(find $PREFIX/share/android-sdk -name "android.jar")
+        aapt2 link -I $ANDROID_JAR --manifest app/AndroidManifest.xml -o CalascioNES.apk
+        cd app && zip -r ../CalascioNES.apk lib && cd ..
+        if [ ! -f "debug.keystore" ]; then keytool -genkey -v -keystore debug.keystore -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US" -storepass android -keypass android; fi
+        apksigner sign --ks debug.keystore --ks-key-alias androiddebugkey --ks-pass pass:android CalascioNES.apk
+        echo -e "\nSUCESSO! APK gerado: $(pwd)/CalascioNES.apk"
+        EOF
+        chmod +x build.sh
+
+    - name: 6. Fazer Commit e Push das Mudanças
       run: |
-        cd build_dir
-        gradle wrapper --gradle-version 8.4
-        chmod +x ./gradlew
-        ./gradlew :app:assembleRelease --stacktrace
-
-    - name: 6. Publicar o APK
-      uses: actions/upload-artifact@v4
-      with:
-        name: CalascioNES-Android-APK
-        path: build_dir/app/build/outputs/apk/release/app-release-unsigned.apk
+        git config --global user.name "GitHub Actions Bot"
+        git config --global user.email "github-actions-bot@github.com"
+        git add .
+        # Verifica se há mudanças para commitar
+        if git diff-index --quiet HEAD; then
+          echo "Nenhuma mudança para commitar."
+        else
+          echo "Commitando as mudanças..."
+          # A mensagem [skip ci] evita que o workflow seja acionado novamente
+          git commit -m "Automated: Transform project to Android Native (no SDL2) [skip ci]"
+          echo "Fazendo push para o repositório..."
+          git push
+        fi
